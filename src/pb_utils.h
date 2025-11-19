@@ -29,6 +29,9 @@
 #ifdef TRITON_ENABLE_GPU
 #include <cuda.h>
 #endif  // TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#endif  // TRITON_ENABLE_ROCM
 #include <pthread.h>
 
 #include <boost/interprocess/sync/interprocess_condition.hpp>
@@ -89,6 +92,15 @@ namespace bi = boost::interprocess;
     if (cuda_err__ != cudaSuccess) {                    \
       throw PythonBackendException(                     \
           std::string(cudaGetErrorString(cuda_err__))); \
+    }                                                   \
+  } while (false)
+
+#define THROW_IF_HIP_ERROR(X)                          \
+  do {                                                  \
+    hipError_t hip_err__ = (X);                       \
+    if (hip_err__ != hipSuccess) {                    \
+      throw PythonBackendException(                     \
+          std::string(hipGetErrorString(hip_err__))); \
     }                                                   \
   } while (false)
 
@@ -283,6 +295,66 @@ class CUDAHandler {
   /// Set the device only if the primary context has already been created for
   /// this device. Inspired from PyTorch's MaybeSetDevice.
   /// \param device The cuda device index.
+  void MaybeSetDevice(int device);
+};
+
+
+/// A helper class to change the current device and restore the old context. The
+/// old context will be restored only if the primary context for that device is
+/// already created, otherwise the CUDA context will remain as the primary
+/// context of 'device'.
+class ScopedSetDevice {
+ public:
+  ScopedSetDevice(int device);
+  ~ScopedSetDevice();
+
+ private:
+  int device_;
+  int current_device_;
+};
+
+#elif defined(TRITON_ENABLE_ROCM)
+class HIPHandler {
+ public:
+  static HIPHandler& getInstance()
+  {
+    static HIPHandler instance;
+    return instance;
+  }
+
+ private:
+  std::mutex mu_;
+  void* dl_open_handle_ = nullptr;
+  std::string error_str_;
+  hipError_t (*cu_pointer_get_attribute_fn_)(
+      hipDeviceptr_t*, hipPointer_attribute, hipDeviceptr_t) = nullptr;
+  hipError_t (*cu_get_error_string_fn_)(hipError_t, const char**) = nullptr;
+  hipError_t (*cu_init_fn_)(unsigned int) = nullptr;
+  hipError_t (*cu_device_primary_ctx_get_state_fn_)(
+      hipDevice_t, unsigned int*, int*) = nullptr;
+  HIPHandler();
+
+  /// Check if a primary context has already been created for a device.
+  bool HasPrimaryContext(int device);
+  ~HIPHandler() noexcept(false);
+
+ public:
+  HIPHandler(HIPHandler const&) = delete;
+  void operator=(HIPHandler const&) = delete;
+  bool IsAvailable();
+  const std::string& GetErrorString() const { return error_str_; }
+  void ClearErrorString() { return error_str_.clear(); }
+  void PointerGetAttribute(
+      hipDeviceptr_t* start_address, hipPointer_attribute attr,
+      hipDeviceptr_t device_ptr);
+  void OpenHipHandle(
+      int64_t memory_type_id, hipIpcMemHandle_t* cuda_mem_handle,
+      void** data_ptr);
+  void CloseHipHandle(int64_t memory_type_id, void* data_ptr);
+
+  /// Set the device only if the primary context has already been created for
+  /// this device. Inspired from PyTorch's MaybeSetDevice.
+  /// \param device The hip device index.
   void MaybeSetDevice(int device);
 };
 

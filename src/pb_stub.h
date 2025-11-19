@@ -59,8 +59,12 @@ namespace bi = boost::interprocess;
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-#ifndef TRITON_ENABLE_GPU
-using cudaStream_t = void*;
+#ifdef TRITON_ENABLE_GPU
+using deviceStream_t = cudaStream_t;
+#elif defined(TRITON_ENABLE_ROCM)
+using deviceStream_t = hipStream_t;
+#else
+using deviceStream_t = void*;
 #endif
 
 namespace triton { namespace backend { namespace python {
@@ -348,7 +352,7 @@ class Stub {
 
   /// Helper function to retrieve a proxy stream for dlpack synchronization
   /// for provided device
-  cudaStream_t GetProxyStream(const int& device_id);
+  deviceStream_t GetProxyStream(const int& device_id);
 
  private:
   bi::interprocess_mutex* stub_mutex_;
@@ -387,7 +391,7 @@ class Stub {
   std::unordered_map<void*, std::shared_ptr<ResponseIterator>>
       response_iterator_map_;
   std::mutex dlpack_proxy_stream_pool_mu_;
-  std::unordered_map<int, cudaStream_t> dlpack_proxy_stream_pool_;
+  std::unordered_map<int, deviceStream_t> dlpack_proxy_stream_pool_;
 };
 
 template <typename MessageType>

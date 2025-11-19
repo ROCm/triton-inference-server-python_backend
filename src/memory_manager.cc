@@ -59,6 +59,33 @@ GPUMemoryRecord::ReleaseCallback()
 {
   return release_callback_;
 }
+#elif defined(TRITON_ENABLE_ROCM)
+GPUMemoryRecord::GPUMemoryRecord(void* ptr)
+{
+  ptr_ = ptr;
+  release_callback_ = [](void* ptr) {
+    hipError_t err = hipFree(ptr);
+    if (err != hipSuccess) {
+      LOG_MESSAGE(
+          TRITONSERVER_LOG_ERROR,
+          (std::string("Failed to free the allocated hip memory. error: ") +
+           hipGetErrorString(err))
+              .c_str());
+    }
+  };
+}
+
+void*
+GPUMemoryRecord::MemoryId()
+{
+  return ptr_;
+}
+
+const std::function<void(void*)>&
+GPUMemoryRecord::ReleaseCallback()
+{
+  return release_callback_;
+}
 #endif
 
 MemoryManager::MemoryManager(

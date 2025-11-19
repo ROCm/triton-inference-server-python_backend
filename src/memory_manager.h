@@ -39,6 +39,9 @@
 #include <cuda_runtime_api.h>
 #endif  // TRITON_ENABLE_GPU
 
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime_api.h>
+#endif  // TRITON_ENABLE_ROCM
 
 namespace triton { namespace backend { namespace python {
 
@@ -48,7 +51,7 @@ class MemoryRecord {
   virtual void* MemoryId() = 0;
 };
 
-#ifdef TRITON_ENABLE_GPU
+#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
 class GPUMemoryRecord : public MemoryRecord {
  public:
   GPUMemoryRecord(void* ptr);

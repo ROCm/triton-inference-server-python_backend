@@ -59,11 +59,19 @@
 #include <cuda_runtime_api.h>
 #endif  // TRITON_ENABLE_GPU
 
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime_api.h>
+#endif
+
 namespace py = pybind11;
 using namespace pybind11::literals;
 namespace bi = boost::interprocess;
-#ifndef TRITON_ENABLE_GPU
-using cudaStream_t = void*;
+#ifdef TRITON_ENABLE_GPU
+using deviceStream_t = cudaStream_t;
+#elif defined(TRITON_ENABLE_ROCM)
+using deviceStream_t = hipStream_t;
+#else
+using deviceStream_t = void*;
 #endif
 
 namespace triton { namespace backend { namespace python {
@@ -848,6 +856,16 @@ Stub::Finalize()
                  std::to_string(entry.first);
     }
   }
+#elif defined(TRITON_ENABLE_ROCM)
+  std::lock_guard<std::mutex> lock(dlpack_proxy_stream_pool_mu_);
+  for (auto& entry : dlpack_proxy_stream_pool_) {
+    hipError_t err = hipStreamDestroy(entry.second);
+    if (err != hipSuccess) {
+      LOG_ERROR
+          << "Failed to destroy dlpack HIP proxy stream on device with id " +
+                 std::to_string(entry.first);
+    }
+  }
 #endif
 }
 
@@ -1244,7 +1262,7 @@ Stub::EnqueueUtilsMessage(
   stub_to_parent_message_cv_.notify_one();
 }
 
-cudaStream_t
+deviceStream_t
 Stub::GetProxyStream(const int& device_id)
 {
 #ifdef TRITON_ENABLE_GPU
@@ -1262,6 +1280,20 @@ Stub::GetProxyStream(const int& device_id)
     }
   }
   return dlpack_proxy_stream_pool_[device_id];
+#elif defined(TRITON_ENABLE_ROCM)
+  std::lock_guard<std::mutex> lock(dlpack_proxy_stream_pool_mu_);
+  if (dlpack_proxy_stream_pool_.find(device_id) ==
+      dlpack_proxy_stream_pool_.end()) {
+    hipStream_t new_proxy_stream;
+    hipError_t err = hipStreamCreate(&new_proxy_stream);
+    if (err == hipSuccess) {
+      dlpack_proxy_stream_pool_.emplace(device_id, new_proxy_stream);
+      return new_proxy_stream;
+    } else {
+      throw PythonBackendException(
+          "Failed to create a HIP stream for a DLPack call.");
+    }
+  }
 #else
   return nullptr;
 #endif

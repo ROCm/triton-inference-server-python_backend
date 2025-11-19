@@ -218,7 +218,7 @@ ResponseAlloc(
   } else {
     switch (*actual_memory_type) {
       case TRITONSERVER_MEMORY_CPU:
-#ifndef TRITON_ENABLE_GPU
+#if !defined(TRITON_ENABLE_GPU) && !defined(TRITON_ENABLE_ROCM)
       case TRITONSERVER_MEMORY_GPU:
 #endif
       case TRITONSERVER_MEMORY_CPU_PINNED: {
@@ -258,6 +258,29 @@ ResponseAlloc(
               TRITONSERVER_ERROR_INTERNAL,
               std::string(
                   "cudaMalloc failed: " + std::string(cudaGetErrorString(err)))
+                  .c_str());
+        }
+        break;
+      }
+#elif defined(TRITON_ENABLE_ROCM)
+      case TRITONSERVER_MEMORY_GPU: {
+        auto err = hipSetDevice(*actual_memory_type_id);
+        if ((err != hipSuccess) && (err != hipErrorNoDevice) &&
+            (err != hipErrorInsufficientDriver)) {
+          return TRITONSERVER_ErrorNew(
+              TRITONSERVER_ERROR_INTERNAL,
+              std::string(
+                  "unable to set current HIP device: " +
+                  std::string(hipGetErrorString(err)))
+                  .c_str());
+        }
+
+        err = hipMalloc(buffer, byte_size);
+        if (err != hipSuccess) {
+          return TRITONSERVER_ErrorNew(
+              TRITONSERVER_ERROR_INTERNAL,
+              std::string(
+                  "hipMalloc failed: " + std::string(hipGetErrorString(err)))
                   .c_str());
         }
         break;

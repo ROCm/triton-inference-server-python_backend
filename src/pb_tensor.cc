@@ -28,6 +28,10 @@
 #include <cuda.h>
 #endif  // TRITON_ENABLE_GPU
 
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#endif  // TRITON_ENABLE_ROCM
+
 #ifdef TRITON_PB_STUB
 #include "pb_stub.h"
 #include "pb_stub_utils.h"
@@ -239,13 +243,21 @@ PbTensor::DeviceType()
 
   switch (memory_type_) {
     case TRITONSERVER_MEMORY_GPU:
-      device_type = DLDeviceType::kDLCUDA;
+      #ifdef TRITON_ENABLE_GPU
+            device_type = DLDeviceType::kDLCUDA;
+      #elif defined(TRITON_ENABLE_ROCM)
+            device_type = DLDeviceType::kDLROCM;
+      #endif
       break;
     case TRITONSERVER_MEMORY_CPU:
       device_type = DLDeviceType::kDLCPU;
       break;
     case TRITONSERVER_MEMORY_CPU_PINNED:
-      device_type = DLDeviceType::kDLCUDAHost;
+      #ifdef TRITON_ENABLE_ROCM
+        device_type = DLDeviceType::kDLROCMHost;
+      #else
+        device_type = DLDeviceType::kDLCUDAHost;
+      #endif
       break;
   }
 
@@ -350,7 +362,7 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
 
   auto capsule_device_info =
       tensor.attr("__dlpack_device__")().cast<std::pair<int32_t, int64_t>>();
-  if (capsule_device_info.first == DLDeviceType::kDLCUDA) {
+  if (capsule_device_info.first == DLDeviceType::kDLCUDA || capsule_device_info.first == DLDeviceType::kDLROCM) {
 #ifdef TRITON_ENABLE_GPU
     int current_device;
     cudaError_t err = cudaGetDevice(&current_device);
@@ -389,6 +401,44 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
     }
 
     return ptr_to_tensor;
+#elif defined(TRITON_ENABLE_ROCM)
+    int current_device;
+    hipError_t err = hipGetDevice(&current_device);
+    std::unique_ptr<Stub>& stub = Stub::GetOrCreateInstance();
+    if (err != hipSuccess) {
+      throw PythonBackendException("Failed to get current ROCm device id.");
+    }
+    ScopedSetDevice scoped_set_device(capsule_device_info.second);
+
+    bool overridden = (current_device != capsule_device_info.second);
+    hipStream_t proxy_stream = stub->GetProxyStream(current_device);
+
+    // Array API requirements for the stream argument:
+    // stream = 1 the legacy default stream (in this case should
+    // synchronize on CUDA stream 0)
+    // For CPU, `stream=None` is the only accepted argument
+    // according to array API. For GPU, when `stream=None`  producer
+    // must assume the legacy default stream. Reference:
+    // https://data-apis.org/array-api/latest/API_specification/generated/array_api.array.__dlpack__.html
+    auto ptr_to_tensor = FromDLPackCapsule(
+        name, tensor.attr("__dlpack__")(
+                  py::arg("stream") =
+                      py::int_(reinterpret_cast<int64_t>(proxy_stream))));
+
+    // In case there is a pending job on the data, where this capsule
+    // is pointing to, we need to wait for it to finish before returning
+    // capsule.
+    // We synchronize on the proxy stream explicitly since that what we
+    // pass to external tensor's `__dlpack__` method.
+    err = hipStreamSynchronize(proxy_stream);
+    if (err != hipSuccess) {
+      throw PythonBackendException(
+          "Failed to synchronize HIP device with id " +
+          std::to_string(
+              overridden ? capsule_device_info.second : current_device));
+    }
+
+    return ptr_to_tensor;
 #else
     throw PythonBackendException(
         "DLPack capsule passed pointer to memory allocated on GPU device, \
@@ -396,7 +446,8 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
 #endif
   } else if (
       capsule_device_info.first != DLDeviceType::kDLCPU &&
-      capsule_device_info.first != DLDeviceType::kDLCUDAHost) {
+      capsule_device_info.first != DLDeviceType::kDLCUDAHost &&
+      capsule_device_info.first != DLDeviceType::kDLROCMHost) {
     throw PythonBackendException(
         "DLDevice type " + std::to_string(capsule_device_info.first) +
         " is not support by Python backend.");
@@ -458,11 +509,19 @@ PbTensor::FromDLPackCapsule(
       memory_type = TRITONSERVER_MEMORY_GPU;
       memory_type_id = dl_managed_tensor->dl_tensor.device.device_id;
       break;
+    case DLDeviceType::kDLROCM:
+      memory_type = TRITONSERVER_MEMORY_GPU;
+      memory_type_id = dl_managed_tensor->dl_tensor.device.device_id;
+      break;
     case DLDeviceType::kDLCPU:
       memory_type = TRITONSERVER_MEMORY_CPU;
       memory_type_id = 0;
       break;
     case DLDeviceType::kDLCUDAHost:
+      memory_type = TRITONSERVER_MEMORY_CPU;
+      memory_type_id = 0;
+      break;
+    case DLDeviceType::kDLROCMHost:
       memory_type = TRITONSERVER_MEMORY_CPU;
       memory_type_id = 0;
       break;

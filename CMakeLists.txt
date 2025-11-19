@@ -35,12 +35,23 @@ project(tritonpythonbackend LANGUAGES C CXX)
 # projects included in this one by FetchContent.
 #
 option(TRITON_ENABLE_GPU "Enable GPU support in backend" ON)
+option(TRITON_ENABLE_ROCM "Enable ROCm support in backend" OFF)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend" ON)
 option(TRITON_ENABLE_NVTX "Include nvtx markers collection in backend." OFF)
 
 set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
-set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
+if(${TRITON_ENABLE_ROCM})
+  set(TRITON_THIRD_PARTY_REPO_TAG "add_migraphx_rocm_eps_hipify" CACHE STRING
+      "Tag for ROCm/tritonserver-third_party repo")
+  set(TRITON_CORE_REPO_TAG "add_migraphx_rocm_eps_hipify" CACHE STRING "Tag for ROCm/tritonserver-core repo")
+  set(TRITON_BACKEND_REPO_TAG "add_migraphx_rocm_eps_hipify" CACHE STRING "Tag for triton-inference-server/backend repo")
+else()
+  set(TRITON_THIRD_PARTY_REPO_TAG "main" CACHE STRING
+    "Tag for triton-inference-server/third_party repo")
+  set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
+  set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -65,12 +76,12 @@ FetchContent_Declare(
 )
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY https://github.com/triton-inference-server/core.git
+  GIT_REPOSITORY https://github.com/ROCm/tritonserver-core.git
   GIT_TAG ${TRITON_CORE_REPO_TAG}
 )
 FetchContent_Declare(
   repo-backend
-  GIT_REPOSITORY https://github.com/triton-inference-server/backend.git
+  GIT_REPOSITORY https://github.com/ROCm/tritonserver_backend.git
   GIT_TAG ${TRITON_BACKEND_REPO_TAG}
 )
 FetchContent_MakeAvailable(repo-common repo-core repo-backend)
@@ -100,7 +111,7 @@ FetchContent_MakeAvailable(dlpack)
 #
 ExternalProject_Add(
   boostorg
-  URL https://boostorg.jfrog.io/artifactory/main/release/1.79.0/source/boost_1_79_0.tar.gz
+  URL https://archives.boost.io/release/1.79.0/source/boost_1_79_0.tar.gz
   URL_HASH SHA256=273f1be93238a068aba4f9735a4a2b003019af067b9c183ed227780b8f36062c
   PREFIX "boost-src"
   CONFIGURE_COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -120,6 +131,18 @@ if(${TRITON_ENABLE_GPU})
 elseif()
   message(WARNING "TRITON_ENABLE_GPU is OFF, GPU Tensor support will be disabled")
 endif() # TRITON_ENABLE_GPU
+
+#
+# HIP
+#
+if(${TRITON_ENABLE_ROCM})
+  set(CMAKE_PREFIX_PATH "/opt/rocm" ${CMAKE_PREFIX_PATH})
+  find_package(hip REQUIRED)
+  message(STATUS "Using ROCm HIP ${hip_VERSION}")
+  set(HIP_HIPCC_FLAGS -std=c++${TRITON_MIN_CXX_STANDARD})
+elseif()
+  message(WARNING "TRITON_ENABLE_ROCM is OFF, AMD GPU Tensor support will be disabled")
+endif() # TRITON_ENABLE_ROCM
 
 if(${TRITON_ENABLE_NVTX})
   add_definitions(-DTRITON_ENABLE_NVTX=1)

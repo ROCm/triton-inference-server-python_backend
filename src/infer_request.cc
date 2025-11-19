@@ -526,6 +526,18 @@ InferRequest::Exec(const bool is_decoupled)
             ++i;
           }
         }
+#elif defined(TRITON_ENABLE_ROCM)
+        size_t i = 0;
+        for (auto& input_tensor : this->Inputs()) {
+          if (!input_tensor->IsCPU()) {
+            std::unique_ptr<PbMemory> dst_buffer =
+                PbMemory::LoadFromSharedMemory(
+                    shm_pool, (gpu_buffers_handle.data_.get())[i],
+                    true /* open cuda handle */);
+            PbMemory::CopyBuffer(dst_buffer, input_tensor->Memory());
+            ++i;
+          }
+        }
 #endif  // TRITON_ENABLE_GPU
       }
       catch (const PythonBackendException& exception) {
