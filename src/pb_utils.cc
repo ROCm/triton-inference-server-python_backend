@@ -48,11 +48,6 @@
 
 #include "scoped_defer.h"
 
-#ifdef TRITON_ENABLE_GPU
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#endif
-
 #ifdef TRITON_ENABLE_ROCM
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
@@ -60,192 +55,7 @@
 
 namespace triton { namespace backend { namespace python {
 
-#ifdef TRITON_ENABLE_GPU
-
-CUDAHandler::CUDAHandler()
-{
-  dl_open_handle_ = dlopen("libcuda.so", RTLD_LAZY);
-
-  // If libcuda.so is successfully opened, it must be able to find
-  // "cuPointerGetAttribute", "cuGetErrorString", and
-  // "cuDevicePrimaryCtxGetState" symbols.
-  if (dl_open_handle_ != nullptr) {
-    void* cu_pointer_get_attribute_fn =
-        dlsym(dl_open_handle_, "cuPointerGetAttribute");
-    if (cu_pointer_get_attribute_fn == nullptr) {
-      throw PythonBackendException(
-          std::string("Failed to dlsym 'cuPointerGetAttribute'. Error: ") +
-          dlerror());
-    }
-    *((void**)&cu_pointer_get_attribute_fn_) = cu_pointer_get_attribute_fn;
-
-    void* cu_get_error_string_fn = dlsym(dl_open_handle_, "cuGetErrorString");
-    if (cu_get_error_string_fn == nullptr) {
-      throw PythonBackendException(
-          std::string("Failed to dlsym 'cuGetErrorString'. Error: ") +
-          dlerror());
-    }
-    *((void**)&cu_get_error_string_fn_) = cu_get_error_string_fn;
-
-    void* cu_init_fn = dlsym(dl_open_handle_, "cuInit");
-    if (cu_init_fn == nullptr) {
-      throw PythonBackendException(
-          std::string("Failed to dlsym 'cuInit'. Error: ") + dlerror());
-    }
-    *((void**)&cu_init_fn_) = cu_init_fn;
-
-    void* cu_device_primary_ctx_get_state_fn =
-        dlsym(dl_open_handle_, "cuDevicePrimaryCtxGetState");
-    if (cu_device_primary_ctx_get_state_fn == nullptr) {
-      throw PythonBackendException(
-          std::string("Failed to dlsym 'cuDevicePrimaryCtxGetState'. Error: ") +
-          dlerror());
-    }
-    *((void**)&cu_device_primary_ctx_get_state_fn_) =
-        cu_device_primary_ctx_get_state_fn;
-
-    // Initialize the driver API.
-    CUresult cuda_err = (*cu_init_fn_)(0 /* flags */);
-    if (cuda_err != CUDA_SUCCESS) {
-      const char* error_string;
-      (*cu_get_error_string_fn_)(cuda_err, &error_string);
-      error_str_ = std::string("failed to call cuInit: ") + error_string;
-      int status = dlclose(dl_open_handle_);
-      if (status != 0) {
-        throw PythonBackendException("Failed to close the libcuda handle.");
-      }
-      dl_open_handle_ = nullptr;
-    }
-  }
-}
-
-void
-CUDAHandler::PointerGetAttribute(
-    CUdeviceptr* start_address, CUpointer_attribute attribute,
-    CUdeviceptr dev_ptr)
-{
-  CUresult cuda_err =
-      (*cu_pointer_get_attribute_fn_)(start_address, attribute, dev_ptr);
-  if (cuda_err != CUDA_SUCCESS) {
-    const char* error_string;
-    (*cu_get_error_string_fn_)(cuda_err, &error_string);
-    throw PythonBackendException(
-        std::string(
-            "failed to get cuda pointer device attribute: " +
-            std::string(error_string))
-            .c_str());
-  }
-}
-
-bool
-CUDAHandler::IsAvailable()
-{
-  return dl_open_handle_ != nullptr;
-}
-
-void
-CUDAHandler::OpenCudaHandle(
-    int64_t memory_type_id, cudaIpcMemHandle_t* cuda_mem_handle,
-    void** data_ptr)
-{
-  std::lock_guard<std::mutex> guard{mu_};
-  ScopedSetDevice scoped_set_device(memory_type_id);
-
-  cudaError_t err = cudaIpcOpenMemHandle(
-      data_ptr, *cuda_mem_handle, cudaIpcMemLazyEnablePeerAccess);
-  if (err != cudaSuccess) {
-    throw PythonBackendException(
-        std::string("Failed to open the cudaIpcHandle. error: ") +
-        cudaGetErrorString(err));
-  }
-}
-
-void
-CUDAHandler::CloseCudaHandle(int64_t memory_type_id, void* data_ptr)
-{
-  std::lock_guard<std::mutex> guard{mu_};
-  int current_device;
-
-  // Save the previous device
-  cudaError_t err = cudaGetDevice(&current_device);
-  if (err != cudaSuccess) {
-    throw PythonBackendException(
-        std::string("Failed to get the current CUDA device. error: ") +
-        cudaGetErrorString(err));
-  }
-
-  // Restore the previous device before returning from the function.
-  ScopedSetDevice scoped_set_device(memory_type_id);
-  err = cudaIpcCloseMemHandle(data_ptr);
-  if (err != cudaSuccess) {
-    throw PythonBackendException(
-        std::string("Failed to close the cudaIpcHandle. error: ") +
-        cudaGetErrorString(err));
-  }
-}
-
-bool
-CUDAHandler::HasPrimaryContext(int device)
-{
-  unsigned int ctx_flags;
-  int ctx_is_active = 0;
-  CUresult cuda_err = (*cu_device_primary_ctx_get_state_fn_)(
-      device, &ctx_flags, &ctx_is_active);
-  if (cuda_err != CUDA_SUCCESS) {
-    const char* error_string;
-    (*cu_get_error_string_fn_)(cuda_err, &error_string);
-    throw PythonBackendException(
-        std::string(
-            "failed to get primary context state: " + std::string(error_string))
-            .c_str());
-  }
-
-  return ctx_is_active == 1;
-}
-
-void
-CUDAHandler::MaybeSetDevice(int device)
-{
-  if (HasPrimaryContext(device)) {
-    cudaError_t err = cudaSetDevice(device);
-    if (err != cudaSuccess) {
-      throw PythonBackendException(
-          std::string("Failed to set the CUDA device to ") +
-          std::to_string(device) + ". error: " + cudaGetErrorString(err));
-    }
-  }
-}
-
-
-CUDAHandler::~CUDAHandler() noexcept(false)
-{
-  if (dl_open_handle_ != nullptr) {
-    int status = dlclose(dl_open_handle_);
-    if (status != 0) {
-      throw PythonBackendException("Failed to close the libcuda handle.");
-    }
-  }
-}
-
-ScopedSetDevice::ScopedSetDevice(int device)
-{
-  device_ = device;
-  THROW_IF_CUDA_ERROR(cudaGetDevice(&current_device_));
-
-  if (current_device_ != device_) {
-    THROW_IF_CUDA_ERROR(cudaSetDevice(device_));
-  }
-}
-
-ScopedSetDevice::~ScopedSetDevice()
-{
-  if (current_device_ != device_) {
-    CUDAHandler& cuda_handler = CUDAHandler::getInstance();
-    cuda_handler.MaybeSetDevice(current_device_);
-  }
-}
-
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
 
 HIPHandler::HIPHandler()
 {
@@ -293,13 +103,7 @@ HIPHandler::HIPHandler()
     hipError_t cuda_err = (*cu_init_fn_)(0 /* flags */);
     if (cuda_err != hipSuccess) {
       const char* error_string;
-      (*cu_get_error_string_fn_)(cuda_err, &error_string);
-      error_str_ = std::string("failed to call hipInit: ") + error_string;
-      int status = dlclose(dl_open_handle_);
-      if (status != 0) {
-        throw PythonBackendException("Failed to close the libamdhip64 handle.");
-      }
-      dl_open_handle_ = nullptr;
+      THROW_IF_HIP_ERROR((*cu_get_error_string_fn_)(cuda_err, &error_string));
     }
   }
 }
@@ -313,7 +117,7 @@ HIPHandler::PointerGetAttribute(
       (*cu_pointer_get_attribute_fn_)(start_address, attribute, dev_ptr);
   if (cuda_err != hipSuccess) {
     const char* error_string;
-    (*cu_get_error_string_fn_)(cuda_err, &error_string);
+    THROW_IF_HIP_ERROR((*cu_get_error_string_fn_)(cuda_err, &error_string));
     throw PythonBackendException(
         std::string(
             "failed to get hip pointer device attribute: " +
@@ -378,7 +182,7 @@ HIPHandler::HasPrimaryContext(int device)
       device, &ctx_flags, &ctx_is_active);
   if (cuda_err != hipSuccess) {
     const char* error_string;
-    (*cu_get_error_string_fn_)(cuda_err, &error_string);
+    THROW_IF_HIP_ERROR((*cu_get_error_string_fn_)(cuda_err, &error_string));
     throw PythonBackendException(
         std::string(
             "failed to get primary context state: " + std::string(error_string))

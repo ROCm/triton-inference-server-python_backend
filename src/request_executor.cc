@@ -218,7 +218,7 @@ ResponseAlloc(
   } else {
     switch (*actual_memory_type) {
       case TRITONSERVER_MEMORY_CPU:
-#if !defined(TRITON_ENABLE_GPU) && !defined(TRITON_ENABLE_ROCM)
+#ifndef TRITON_ENABLE_ROCM
       case TRITONSERVER_MEMORY_GPU:
 #endif
       case TRITONSERVER_MEMORY_CPU_PINNED: {
@@ -239,30 +239,7 @@ ResponseAlloc(
         }
 
       } break;
-#ifdef TRITON_ENABLE_GPU
-      case TRITONSERVER_MEMORY_GPU: {
-        auto err = cudaSetDevice(*actual_memory_type_id);
-        if ((err != cudaSuccess) && (err != cudaErrorNoDevice) &&
-            (err != cudaErrorInsufficientDriver)) {
-          return TRITONSERVER_ErrorNew(
-              TRITONSERVER_ERROR_INTERNAL,
-              std::string(
-                  "unable to set current CUDA device: " +
-                  std::string(cudaGetErrorString(err)))
-                  .c_str());
-        }
-
-        err = cudaMalloc(buffer, byte_size);
-        if (err != cudaSuccess) {
-          return TRITONSERVER_ErrorNew(
-              TRITONSERVER_ERROR_INTERNAL,
-              std::string(
-                  "cudaMalloc failed: " + std::string(cudaGetErrorString(err)))
-                  .c_str());
-        }
-        break;
-      }
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
       case TRITONSERVER_MEMORY_GPU: {
         auto err = hipSetDevice(*actual_memory_type_id);
         if ((err != hipSuccess) && (err != hipErrorNoDevice) &&

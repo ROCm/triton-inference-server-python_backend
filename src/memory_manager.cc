@@ -32,34 +32,7 @@
 namespace triton { namespace backend { namespace python {
 
 
-#ifdef TRITON_ENABLE_GPU
-GPUMemoryRecord::GPUMemoryRecord(void* ptr)
-{
-  ptr_ = ptr;
-  release_callback_ = [](void* ptr) {
-    cudaError_t err = cudaFree(ptr);
-    if (err != cudaSuccess) {
-      LOG_MESSAGE(
-          TRITONSERVER_LOG_ERROR,
-          (std::string("Failed to free the allocated cuda memory. error: ") +
-           cudaGetErrorString(err))
-              .c_str());
-    }
-  };
-}
-
-void*
-GPUMemoryRecord::MemoryId()
-{
-  return ptr_;
-}
-
-const std::function<void(void*)>&
-GPUMemoryRecord::ReleaseCallback()
-{
-  return release_callback_;
-}
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
 GPUMemoryRecord::GPUMemoryRecord(void* ptr)
 {
   ptr_ = ptr;

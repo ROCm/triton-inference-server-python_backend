@@ -31,10 +31,6 @@
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_memory.h"
 
-#ifdef TRITON_ENABLE_GPU
-#include <cuda_runtime_api.h>
-#endif  // TRITON_ENABLE_GPU
-
 #ifdef TRITON_ENABLE_ROCM
 #include <hip/hip_runtime_api.h>
 #endif  // TRITON_ENABLE_ROCM
@@ -72,10 +68,6 @@ class PbMemory {
   static std::unique_ptr<PbMemory> Create(
       std::unique_ptr<SharedMemoryManager>& shm_pool,
       std::unique_ptr<BackendMemory>&& backend_memory, bool copy_gpu = true);
-#endif
-
-#ifdef TRITON_ENABLE_GPU
-  void SetCudaIpcHandle(cudaIpcMemHandle_t* cuda_ipc_handle);
 #endif
 
 #ifdef TRITON_ENABLE_ROCM
@@ -144,7 +136,7 @@ class PbMemory {
   bi::managed_external_buffer::handle_t memory_shm_handle_;
   bool opened_cuda_ipc_handle_;
 
-#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
   /// Calculate the pointer offset from the base address.
   /// \return The offset of a device pointer.
   /// \throws PythonBackendException if the tensor is stored in CPU.

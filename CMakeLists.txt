@@ -39,7 +39,6 @@ option(TRITON_ENABLE_ROCM "Enable ROCm support in backend" OFF)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend" ON)
 option(TRITON_ENABLE_NVTX "Include nvtx markers collection in backend." OFF)
 
-set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
 set(TRITON_COMMON_REPO_TAG "r23.10" CACHE STRING "Tag for triton-inference-server/common repo")
 if(${TRITON_ENABLE_ROCM})
   set(TRITON_THIRD_PARTY_REPO_TAG "add_migraphx_rocm_eps_hipify" CACHE STRING
@@ -121,16 +120,6 @@ ExternalProject_Add(
 )
 set(boostorg_INCLUDE_DIRS "${CMAKE_BINARY_DIR}/boost/")
 
-#
-# CUDA
-#
-if(${TRITON_ENABLE_GPU})
-  find_package(CUDAToolkit REQUIRED)
-  message(STATUS "Using CUDA ${CUDA_VERSION}")
-  set(CUDA_NVCC_FLAGS -std=c++11)
-elseif()
-  message(WARNING "TRITON_ENABLE_GPU is OFF, GPU Tensor support will be disabled")
-endif() # TRITON_ENABLE_GPU
 
 #
 # HIP

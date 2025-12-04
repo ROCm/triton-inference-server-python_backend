@@ -35,10 +35,6 @@
 #include "triton/backend/backend_common.h"
 #include "triton/core/tritonserver.h"
 
-#ifdef TRITON_ENABLE_GPU
-#include <cuda_runtime_api.h>
-#endif  // TRITON_ENABLE_GPU
-
 #ifdef TRITON_ENABLE_ROCM
 #include <hip/hip_runtime_api.h>
 #endif  // TRITON_ENABLE_ROCM
@@ -51,7 +47,7 @@ class MemoryRecord {
   virtual void* MemoryId() = 0;
 };
 
-#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
 class GPUMemoryRecord : public MemoryRecord {
  public:
   GPUMemoryRecord(void* ptr);

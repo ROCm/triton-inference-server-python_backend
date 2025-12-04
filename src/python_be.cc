@@ -457,7 +457,7 @@ ModelInstanceState::GetInputTensor(
   if (responses) {
     collector = std::make_unique<BackendInputCollector>(
         &request, 1, responses.get(), Model()->TritonMemoryManager(),
-        false /* pinned_enable */, CudaStream(), nullptr, nullptr, 0,
+        false /* pinned_enable */, RocmStream(), nullptr, nullptr, 0,
         HostPolicyName().c_str());
   }
 
@@ -468,22 +468,7 @@ ModelInstanceState::GetInputTensor(
     cpu_only_tensors = true;
   }
 
-#ifdef TRITON_ENABLE_GPU
-  CUDAHandler& cuda_handler = CUDAHandler::getInstance();
-  // If CUDA driver API is not available, the input tensors will be moved to
-  // CPU.
-  if (!cuda_handler.IsAvailable() && !cpu_only_tensors) {
-    if (!cuda_handler.GetErrorString().empty()) {
-      LOG_MESSAGE(
-          TRITONSERVER_LOG_WARN, (std::string(
-                                      "Forcing CPU only input tensors: " +
-                                      cuda_handler.GetErrorString()))
-                                     .c_str());
-    }
-    cuda_handler.ClearErrorString();
-    cpu_only_tensors = true;
-  }
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
   HIPHandler& hip_handler = HIPHandler::getInstance();
   // If HIP driver API is not available, the input tensors will be moved to
   // CPU.
@@ -508,16 +493,13 @@ ModelInstanceState::GetInputTensor(
       in, 0 /* input buffer index */, &src_ptr, &src_byte_size,
       &src_memory_type, &src_memory_type_id));
 
-// If TRITON_ENABLE_GPU is false, we need to copy the tensors
+// If TRITON_ENABLE_ROCM is false, we need to copy the tensors
 // to the CPU.
-#ifdef TRITON_ENABLE_GPU
-  cpu_only_tensors = false;
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
   cpu_only_tensors = false;
 #else
   cpu_only_tensors = true;
-#endif  // TRITON_ENABLE_GPU
-
+#endif  // TRITON_ENABLE_ROCM
   if (cpu_only_tensors || src_memory_type != TRITONSERVER_MEMORY_GPU) {
     input_tensor = std::make_shared<PbTensor>(
         std::string(input_name),
@@ -539,69 +521,7 @@ ModelInstanceState::GetInputTensor(
           request, input_name, input_buffer, &byte_size));
     }
   } else {
-#ifdef TRITON_ENABLE_GPU
-
-    // Retrieving GPU input tensors
-    const void* buffer = nullptr;
-    std::vector<std::pair<TRITONSERVER_MemoryType, int64_t>> alloc_perference;
-    alloc_perference = {{TRITONSERVER_MEMORY_GPU, src_memory_type_id}};
-
-    // collector is used in the non-decoupled mode.
-    if (collector) {
-      RETURN_IF_ERROR(collector->ProcessTensor(
-          input_name, nullptr, 0, alloc_perference,
-          reinterpret_cast<const char**>(&buffer), &input_byte_size,
-          &src_memory_type, &src_memory_type_id));
-      // If the tensor is using the cuda shared memory, we need to extract the
-      // handle that was used to create the device pointer. This is because of a
-      // limitation in the legacy CUDA IPC API that doesn't allow getting the
-      // handle of an exported pointer. If the cuda handle exists, it indicates
-      // that the cuda shared memory was used and the input is in a single
-      // buffer.
-      // [FIXME] For the case where the input is in cuda shared memory and uses
-      // multiple input buffers this needs to be changed.
-      TRITONSERVER_BufferAttributes* buffer_attributes;
-
-      // This value is not used.
-      const void* buffer_p;
-      RETURN_IF_ERROR(TRITONBACKEND_InputBufferAttributes(
-          in, 0, &buffer_p, &buffer_attributes));
-
-      input_tensor = std::make_shared<PbTensor>(
-          std::string(input_name),
-          std::vector<int64_t>(input_shape, input_shape + input_dims_count),
-          input_dtype, src_memory_type, src_memory_type_id,
-          const_cast<void*>(buffer), input_byte_size,
-          nullptr /* DLManagedTensor */);
-
-      cudaIpcMemHandle_t* cuda_ipc_handle;
-      RETURN_IF_ERROR(TRITONSERVER_BufferAttributesCudaIpcHandle(
-          buffer_attributes, reinterpret_cast<void**>(&cuda_ipc_handle)));
-      if (cuda_ipc_handle != nullptr) {
-        RETURN_IF_EXCEPTION(input_tensor->SaveToSharedMemory(
-            Stub()->ShmPool(), false /* copy_gpu */));
-        RETURN_IF_EXCEPTION(
-            input_tensor->Memory()->SetCudaIpcHandle(cuda_ipc_handle));
-      } else {
-        RETURN_IF_EXCEPTION(input_tensor->SaveToSharedMemory(
-            Stub()->ShmPool(), true /* copy_gpu */));
-      }
-    } else {
-      void* dev_ptr;
-      RETURN_IF_CUDA_ERROR(
-          cudaMalloc(&dev_ptr, input_byte_size), TRITONSERVER_ERROR_INTERNAL,
-          std::string("Failed to allocated CUDA memory"));
-
-      size_t byte_size = input_byte_size;
-
-      bool cuda_used = false;
-      RETURN_IF_ERROR(backend::ReadInputTensor(
-          request, input_name, reinterpret_cast<char*>(dev_ptr), &byte_size,
-          TRITONSERVER_MEMORY_GPU, src_memory_type_id, CudaStream(),
-          &cuda_used));
-
-      if (cuda_used) {
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
     // Retrieving GPU input tensors
     const void* buffer = nullptr;
     std::vector<std::pair<TRITONSERVER_MemoryType, int64_t>> alloc_perference;
@@ -649,7 +569,7 @@ ModelInstanceState::GetInputTensor(
       }
     } else {
       void* dev_ptr;
-      RETURN_IF_HIP_ERROR(
+      RETURN_IF_ROCM_ERROR(
           hipMalloc(&dev_ptr, input_byte_size), TRITONSERVER_ERROR_INTERNAL,
           std::string("Failed to allocated HIP memory"));
 
@@ -658,14 +578,12 @@ ModelInstanceState::GetInputTensor(
       bool cuda_used = false;
       RETURN_IF_ERROR(backend::ReadInputTensor(
           request, input_name, reinterpret_cast<char*>(dev_ptr), &byte_size,
-          TRITONSERVER_MEMORY_GPU, src_memory_type_id, CudaStream(),
+          TRITONSERVER_MEMORY_GPU, src_memory_type_id, RocmStream(),
           &cuda_used));
 
       if (cuda_used) {
-#ifdef TRITON_ENABLE_GPU
-        cudaStreamSynchronize(stream_);
-#elif defined(TRITON_ENABLE_ROCM)
-        hipStreamSynchronize(stream_);
+#ifdef TRITON_ENABLE_ROCM
+        THROW_IF_HIP_ERROR(hipStreamSynchronize(stream_));
 #endif
       }
 
@@ -689,7 +607,7 @@ ModelInstanceState::GetInputTensor(
     return TRITONSERVER_ErrorNew(
         TRITONSERVER_ERROR_INTERNAL,
         "Python backend does not support GPU tensors.");
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
   }
 
   return nullptr;
@@ -743,7 +661,7 @@ ModelInstanceState::ExecuteBLSRequest(
       try {
         for (auto& input_tensor : infer_request->Inputs()) {
           if (!input_tensor->IsCPU()) {
-#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
             BackendMemory* backend_memory;
             std::unique_ptr<BackendMemory> lbackend_memory;
             has_gpu_tensor = true;
@@ -762,7 +680,7 @@ ModelInstanceState::ExecuteBLSRequest(
             input_tensor->SetMemory(std::move(PbMemory::Create(
                 Stub()->ShmPool(), std::move(lbackend_memory))));
             gpu_buffer_helper.AddBuffer(input_tensor->Memory()->ShmHandle());
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
           }
         }
       }
@@ -1244,7 +1162,7 @@ ModelInstanceState::ResponseSendDecoupled(
           reinterpret_cast<TRITONBACKEND_ResponseFactory*>(response_factory));
     }
     infer_response->Send(
-        response, CudaStream(), requires_deferred_callback,
+        response, RocmStream(), requires_deferred_callback,
         send_message_payload->flags, Stub()->ShmPool(), gpu_buffer_helper,
         gpu_output_buffers);
 
@@ -1275,18 +1193,14 @@ ModelInstanceState::ResponseSendDecoupled(
               "Failed to copy the output tensor to buffer.",
               TRITONSERVER_MEMORY_CPU, 0, TRITONSERVER_MEMORY_CPU, 0,
               pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-              CudaStream(), &cuda_used);
+              RocmStream(), &cuda_used);
           cuda_copy |= cuda_used;
         }
-#ifdef TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
         if (cuda_copy) {
-          cudaStreamSynchronize(stream_);
+          THROW_IF_HIP_ERROR(hipStreamSynchronize(stream_));
         }
-#elif defined(TRITON_ENABLE_ROCM)
-        if (cuda_copy) {
-          hipStreamSynchronize(stream_);
-        }
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
       }
     }
   } else {
@@ -1623,7 +1537,7 @@ ModelInstanceState::ProcessRequests(
     gpu_output_buffers[r] =
         std::vector<std::pair<std::unique_ptr<PbMemory>, void*>>{};
     infer_response->Send(
-        response, CudaStream(), require_deferred_callback,
+        response, RocmStream(), require_deferred_callback,
         TRITONSERVER_RESPONSE_COMPLETE_FINAL, Stub()->ShmPool(),
         gpu_buffer_helper, gpu_output_buffers[r], requested_output_names);
 
@@ -1663,20 +1577,18 @@ ModelInstanceState::ProcessRequests(
                   "Failed to copy the output tensor to buffer.",
                   TRITONSERVER_MEMORY_CPU, 0, TRITONSERVER_MEMORY_CPU, 0,
                   pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-                  CudaStream(), &cuda_used));
+                  RocmStream(), &cuda_used));
           cuda_copy |= cuda_used;
         }
       }
       response_index++;
-#ifdef TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
       if (cuda_copy) {
-        cudaStreamSynchronize(stream_);
+        // hipMalloc(&dev_ptr, input_byte_size), TRITONSERVER_ERROR_INTERNAL,
+        //   std::string("Failed to allocated HIP memory")
+        THROW_IF_HIP_ERROR(hipStreamSynchronize(stream_));
       }
-#elif defined(TRITON_ENABLE_ROCM)
-      if (cuda_copy) {
-        hipStreamSynchronize(stream_);
-      }
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
     }
   }
 
@@ -1728,7 +1640,7 @@ ModelInstanceState::PrepareResponseHandle(
     // For GPU tensors we need to store the memory release id in
     // memory manager.
     if (!output_tensor->IsCPU()) {
-#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
       std::unique_ptr<MemoryRecord> gpu_memory_record =
           std::make_unique<GPUMemoryRecord>(output_tensor->Memory()->DataPtr());
       uint64_t memory_release_id =
@@ -2447,7 +2359,7 @@ TRITONBACKEND_GetBackendAttribute(
   // so Triton core won't blindly auto-complete kind that may not be supported.
   // Other instance groups setting are set to "no value" so that Triton core
   // will auto-complete them with default policy.
-#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
   RETURN_IF_ERROR(TRITONBACKEND_BackendAttributeAddPreferredInstanceGroup(
       backend_attributes, TRITONSERVER_INSTANCEGROUPKIND_GPU, 0, nullptr, 0));
 #else

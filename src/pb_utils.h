@@ -26,9 +26,6 @@
 
 #pragma once
 
-#ifdef TRITON_ENABLE_GPU
-#include <cuda.h>
-#endif  // TRITON_ENABLE_GPU
 #ifdef TRITON_ENABLE_ROCM
 #include <hip/hip_runtime.h>
 #endif  // TRITON_ENABLE_ROCM
@@ -253,67 +250,7 @@ struct RequestBatch {
   bi::managed_external_buffer::handle_t gpu_buffers_handle;
 };
 
-#ifdef TRITON_ENABLE_GPU
-class CUDAHandler {
- public:
-  static CUDAHandler& getInstance()
-  {
-    static CUDAHandler instance;
-    return instance;
-  }
-
- private:
-  std::mutex mu_;
-  void* dl_open_handle_ = nullptr;
-  std::string error_str_;
-  CUresult (*cu_pointer_get_attribute_fn_)(
-      CUdeviceptr*, CUpointer_attribute, CUdeviceptr) = nullptr;
-  CUresult (*cu_get_error_string_fn_)(CUresult, const char**) = nullptr;
-  CUresult (*cu_init_fn_)(unsigned int) = nullptr;
-  CUresult (*cu_device_primary_ctx_get_state_fn_)(
-      CUdevice, unsigned int*, int*) = nullptr;
-  CUDAHandler();
-
-  /// Check if a primary context has already been created for a device.
-  bool HasPrimaryContext(int device);
-  ~CUDAHandler() noexcept(false);
-
- public:
-  CUDAHandler(CUDAHandler const&) = delete;
-  void operator=(CUDAHandler const&) = delete;
-  bool IsAvailable();
-  const std::string& GetErrorString() const { return error_str_; }
-  void ClearErrorString() { return error_str_.clear(); }
-  void PointerGetAttribute(
-      CUdeviceptr* start_address, CUpointer_attribute attr,
-      CUdeviceptr device_ptr);
-  void OpenCudaHandle(
-      int64_t memory_type_id, cudaIpcMemHandle_t* cuda_mem_handle,
-      void** data_ptr);
-  void CloseCudaHandle(int64_t memory_type_id, void* data_ptr);
-
-  /// Set the device only if the primary context has already been created for
-  /// this device. Inspired from PyTorch's MaybeSetDevice.
-  /// \param device The cuda device index.
-  void MaybeSetDevice(int device);
-};
-
-
-/// A helper class to change the current device and restore the old context. The
-/// old context will be restored only if the primary context for that device is
-/// already created, otherwise the CUDA context will remain as the primary
-/// context of 'device'.
-class ScopedSetDevice {
- public:
-  ScopedSetDevice(int device);
-  ~ScopedSetDevice();
-
- private:
-  int device_;
-  int current_device_;
-};
-
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
 class HIPHandler {
  public:
   static HIPHandler& getInstance()
@@ -373,7 +310,7 @@ class ScopedSetDevice {
   int current_device_;
 };
 
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
 
 #ifndef TRITON_PB_STUB
 std::shared_ptr<TRITONSERVER_Error*> WrapTritonErrorInSharedPtr(

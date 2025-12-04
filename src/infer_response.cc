@@ -285,33 +285,7 @@ InferResponse::Send(
     std::unique_ptr<PbMemory> output_buffer;
     if (src_memory_type == TRITONSERVER_MEMORY_GPU &&
         actual_memory_type == TRITONSERVER_MEMORY_GPU) {
-#ifdef TRITON_ENABLE_GPU
-      cudaIpcMemHandle_t* cuda_ipc_mem_handle_p;
-      SET_ERROR_AND_RETURN(
-          response_error,
-          TRITONSERVER_BufferAttributesCudaIpcHandle(
-              output_buffer_attributes,
-              reinterpret_cast<void**>(&cuda_ipc_mem_handle_p)));
-
-      if (cuda_ipc_mem_handle_p != nullptr) {
-        SET_ERROR_AND_RETURN_IF_EXCEPTION(
-            response_error,
-            output_buffer = PbMemory::Create(
-                shm_pool, actual_memory_type, actual_memory_type_id,
-                output_tensor->ByteSize(), reinterpret_cast<char*>(buffer),
-                false /* copy_gpu */));
-        output_buffer->SetCudaIpcHandle(cuda_ipc_mem_handle_p);
-      } else {
-        SET_ERROR_AND_RETURN_IF_EXCEPTION(
-            response_error,
-            output_buffer = PbMemory::Create(
-                shm_pool, actual_memory_type, actual_memory_type_id,
-                output_tensor->ByteSize(), reinterpret_cast<char*>(buffer),
-                true /* copy_gpu */));
-      }
-      gpu_buffer_helper.AddBuffer(output_buffer->ShmHandle());
-      output_buffers.push_back({std::move(output_buffer), buffer});
-#elif defined(TRITON_ENABLE_ROCM)
+#ifdef TRITON_ENABLE_ROCM
       hipIpcMemHandle_t* hip_ipc_mem_handle_p;
       SET_ERROR_AND_RETURN(
           response_error,
@@ -355,15 +329,7 @@ InferResponse::Send(
     }
 
     if (src_memory_type != TRITONSERVER_MEMORY_GPU) {
-      #ifdef TRITON_ENABLE_GPU
-        SET_ERROR_AND_RETURN(
-            response_error,
-            CopyBuffer(
-                "Failed to copy the output tensor to buffer.", src_memory_type,
-                src_memory_type_id, actual_memory_type, actual_memory_type_id,
-                output_tensor->ByteSize(), output_tensor->DataPtr(), buffer,
-                reinterpret_cast<cudaStream_t>(cuda_stream), &cuda_used));
-      #elif defined(TRITON_ENABLE_ROCM)
+      #ifdef TRITON_ENABLE_ROCM
         SET_ERROR_AND_RETURN(
             response_error,
             CopyBuffer(
@@ -377,15 +343,11 @@ InferResponse::Send(
     cuda_copy |= cuda_used;
   }
 
-#ifdef TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
   if (cuda_copy) {
-    cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(cuda_stream));
+    THROW_IF_HIP_ERROR(hipStreamSynchronize(reinterpret_cast<hipStream_t>(cuda_stream)));
   }
-#elif defined(TRITON_ENABLE_ROCM)
-  if (cuda_copy) {
-    hipStreamSynchronize(reinterpret_cast<hipStream_t>(cuda_stream))
-  }
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_ROCM
 }
 #endif
 
