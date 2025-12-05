@@ -75,12 +75,12 @@ FetchContent_Declare(
 )
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY https://github.com/ROCm/tritonserver-core.git
+  GIT_REPOSITORY https://github.com/ROCm/triton-inference-server-core.git
   GIT_TAG ${TRITON_CORE_REPO_TAG}
 )
 FetchContent_Declare(
   repo-backend
-  GIT_REPOSITORY https://github.com/ROCm/tritonserver_backend.git
+  GIT_REPOSITORY https://github.com/ROCm/triton-inference-server-backend.git
   GIT_TAG ${TRITON_BACKEND_REPO_TAG}
 )
 FetchContent_MakeAvailable(repo-common repo-core repo-backend)
