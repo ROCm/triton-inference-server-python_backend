@@ -164,7 +164,12 @@ sudo apt-get install rapidjson-dev libarchive-dev zlib1g-dev
 ```
 mkdir build
 cd build
-cmake -DTRITON_ENABLE_GPU=ON -DTRITON_BACKEND_REPO_TAG=<GIT_BRANCH_NAME> -DTRITON_COMMON_REPO_TAG=<GIT_BRANCH_NAME> -DTRITON_CORE_REPO_TAG=<GIT_BRANCH_NAME> -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install ..
+cmake -DTRITON_ENABLE_GPU=OFF \
+  -DTRITON_ENABLE_ROCM=ON \
+  -DTRITON_ENABLE_TESTS=ON \
+  -Dhip_DIR=/opt/rocm/lib/cmake/hip \
+  -DHIPIFY_PEARL_PATH=/opt/rocm/bin \
+  -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install ..
 make install
 ```
 
