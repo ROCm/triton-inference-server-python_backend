@@ -351,3 +351,13 @@ export(
 )
 
 export(PACKAGE TritonPythonBackend)
+
+#
+# Testing
+#
+
+option(TRITON_ENABLE_TESTS "Build unit tests" ON)
+if(${TRITON_ENABLE_TESTS})
+  enable_testing()
+  add_subdirectory(test)
+endif()
