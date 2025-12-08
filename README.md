@@ -40,6 +40,7 @@ any C++ code.
   - [User Documentation](#user-documentation)
   - [Quick Start](#quick-start)
   - [Building from Source](#building-from-source)
+  - [Running Tests](#running-tests)
   - [Usage](#usage)
     - [`auto_complete_config`](#auto_complete_config)
     - [`initialize`](#initialize)
@@ -198,6 +199,14 @@ cp examples/add_sub/config.pbtxt models/add_sub/config.pbtxt
 
 ```
 python3 examples/add_sub/client.py
+```
+
+## Running Tests
+
+After following [Building from Source](#building-from-source), you can run the tests with the following command from the `build` directory:
+
+```bash
+ctest --verbose --output-on-failure
 ```
 
 ## Usage
