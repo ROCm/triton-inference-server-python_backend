@@ -1,82 +1,203 @@
-# Copyright 2020-2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
-#    documentation and/or other materials provided with the distribution.
-#  * Neither the name of NVIDIA CORPORATION nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
-# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-# OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-import sys
-
 import numpy as np
+import sys
+import argparse
+from typing import List, Tuple
 import tritonclient.http as httpclient
-from tritonclient.utils import *
+from tritonclient.utils import InferenceServerException
 
-model_name = "pytorch"
-shape = [4]
 
-with httpclient.InferenceServerClient("localhost:8000") as client:
-    input0_data = np.random.rand(*shape).astype(np.float32)
-    input1_data = np.random.rand(*shape).astype(np.float32)
-    inputs = [
-        httpclient.InferInput(
-            "INPUT0", input0_data.shape, np_to_triton_dtype(input0_data.dtype)
-        ),
-        httpclient.InferInput(
-            "INPUT1", input1_data.shape, np_to_triton_dtype(input1_data.dtype)
-        ),
-    ]
+class SimpleTokenizer:
+    """
+    A simple character-level tokenizer for demo purposes.
+    """
+    
+    def __init__(self, vocab_size=10000):
+        self.vocab_size = vocab_size
+        self.pad_token_id = 0
+        self.unk_token_id = 1
+        
+    def encode(self, text: str, max_length: int = 128) -> Tuple[List[int], List[int]]:
+        """
+        Encode text to token IDs and create attention mask.
+        
+        Args:
+            text: Input text string
+            max_length: Maximum sequence length
+            
+        Returns:
+            Tuple of (input_ids, attention_mask)
+        """
+        # Simple character-level encoding that maps each character to an ID based on its ASCII value
+        input_ids = [min(ord(c), self.vocab_size - 1) for c in text.lower()]
+        
+        # Truncate if too long
+        if len(input_ids) > max_length:
+            input_ids = input_ids[:max_length]
+        
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = [1] * len(input_ids)
+        
+        # Pad to max_length
+        padding_length = max_length - len(input_ids)
+        input_ids.extend([self.pad_token_id] * padding_length)
+        attention_mask.extend([0] * padding_length)
+        
+        return input_ids, attention_mask
 
-    inputs[0].set_data_from_numpy(input0_data)
-    inputs[1].set_data_from_numpy(input1_data)
 
-    outputs = [
-        httpclient.InferRequestedOutput("OUTPUT0"),
-        httpclient.InferRequestedOutput("OUTPUT1"),
-    ]
+class SentimentClient:
+    """
+    Client for the Transformer Sentiment Classifier on Triton Inference Server.
+    """
+    
+    def __init__(self, url: str = "localhost:8000", model_name: str = "transformer"):
+        """
+        Initialize the client.
+        
+        Args:
+            url: Triton server URL (e.g., "localhost:8000")
+            model_name: Name of the model 
+        """
+        self.url = url
+        self.model_name = model_name
+        self.client = httpclient.InferenceServerClient(url=url, verbose=False)
+        self.tokenizer = SimpleTokenizer()
+        self.max_seq_length = 128
+        self.class_names = ["Negative", "Neutral", "Positive"]
+        
+    def check_server_ready(self) -> bool:
+        """Check if the Triton server is ready."""
+        try:
+            if self.client.is_server_ready():
+                print(f"Server at {self.url} is ready")
+                return True
+            else:
+                print(f"Server at {self.url} is not ready")
+                return False
+        except InferenceServerException as e:
+            print(f"Failed to connect to server at {self.url}")
+            print(f"  Error: {e}")
+            return False
+    
+    def check_model_ready(self) -> bool:
+        """Check if the model is ready."""
+        try:
+            if self.client.is_model_ready(self.model_name):
+                print(f"Model '{self.model_name}' is ready")
+                return True
+            else:
+                print(f"Model '{self.model_name}' is not ready")
+                return False
+        except InferenceServerException as e:
+            print(f"Failed to check model status")
+            print(f"  Error: {e}")
+            return False
+    
+    def predict(self, text: str) -> Tuple[np.ndarray, int, str]:
+        """
+        Run inference on a single text input.
+        
+        Args:
+            text: Input text string
+            
+        Returns:
+            Tuple of (probabilities, predicted_class, class_name)
+        """
+        # Tokenize input
+        input_ids, attention_mask = self.tokenizer.encode(text, self.max_seq_length)
+        
+        # Convert to numpy arrays with batch dimension
+        input_ids_np = np.array([input_ids], dtype=np.int64)
+        attention_mask_np = np.array([attention_mask], dtype=np.int64)
+        
+        # Create input objects
+        inputs = [
+            httpclient.InferInput("INPUT_IDS", input_ids_np.shape, "INT64"),
+            httpclient.InferInput("ATTENTION_MASK", attention_mask_np.shape, "INT64")
+        ]
+        
+        # Set data
+        inputs[0].set_data_from_numpy(input_ids_np)
+        inputs[1].set_data_from_numpy(attention_mask_np)
+        
+        # Create output object
+        outputs = [httpclient.InferRequestedOutput("OUTPUT")]
+        
+        # Send inference request
+        try:
+            response = self.client.infer(
+                model_name=self.model_name,
+                inputs=inputs,
+                outputs=outputs
+            )
+            
+            # Get output
+            output = response.as_numpy("OUTPUT")[0]  # Remove batch dimension
+            predicted_class = int(np.argmax(output))
+            class_name = self.class_names[predicted_class]
+            
+            return output, predicted_class, class_name
+            
+        except InferenceServerException as e:
+            print(f"Inference failed: {e}")
+            raise
+    
+    def predict_batch(self, texts: List[str]) -> List[Tuple[np.ndarray, int, str]]:
+        """
+        Run inference on a batch of text inputs.
+        
+        Args:
+            texts: List of input text strings
+            
+        Returns:
+            List of tuples (probabilities, predicted_class, class_name) for each input
+        """
+        # Tokenize all inputs
+        input_ids_batch = []
+        attention_mask_batch = []
+        
+        for text in texts:
+            input_ids, attention_mask = self.tokenizer.encode(text, self.max_seq_length)
+            input_ids_batch.append(input_ids)
+            attention_mask_batch.append(attention_mask)
+        
+        # Convert to numpy arrays
+        input_ids_np = np.array(input_ids_batch, dtype=np.int64)
+        attention_mask_np = np.array(attention_mask_batch, dtype=np.int64)
+        
+        # Create input objects
+        inputs = [
+            httpclient.InferInput("INPUT_IDS", input_ids_np.shape, "INT64"),
+            httpclient.InferInput("ATTENTION_MASK", attention_mask_np.shape, "INT64")
+        ]
+        
+        # Set data
+        inputs[0].set_data_from_numpy(input_ids_np)
+        inputs[1].set_data_from_numpy(attention_mask_np)
+        
+        # Create output object
+        outputs = [httpclient.InferRequestedOutput("OUTPUT")]
+        
+        # Send inference request
+        try:
+            response = self.client.infer(
+                model_name=self.model_name,
+                inputs=inputs,
+                outputs=outputs
+            )
+            
+            # Get outputs
+            outputs_np = response.as_numpy("OUTPUT")
+            
+            results = []
+            for output in outputs_np:
+                predicted_class = int(np.argmax(output))
+                class_name = self.class_names[predicted_class]
+                results.append((output, predicted_class, class_name))
+            
+            return results
+            
+        except InferenceServerException as e:
+            print(f"Batch inference failed: {e}")
+            raise
 
-    response = client.infer(model_name, inputs, request_id=str(1), outputs=outputs)
-
-    result = response.get_response()
-    output0_data = response.as_numpy("OUTPUT0")
-    output1_data = response.as_numpy("OUTPUT1")
-
-    print(
-        "INPUT0 ({}) + INPUT1 ({}) = OUTPUT0 ({})".format(
-            input0_data, input1_data, output0_data
-        )
-    )
-    print(
-        "INPUT0 ({}) - INPUT1 ({}) = OUTPUT0 ({})".format(
-            input0_data, input1_data, output1_data
-        )
-    )
-
-    if not np.allclose(input0_data + input1_data, output0_data):
-        print("pytorch example error: incorrect sum")
-        sys.exit(1)
-
-    if not np.allclose(input0_data - input1_data, output1_data):
-        print("pytorch example error: incorrect difference")
-        sys.exit(1)
-
-    print("PASS: pytorch")
-    sys.exit(0)
