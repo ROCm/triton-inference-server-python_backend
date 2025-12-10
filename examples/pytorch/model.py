@@ -1,155 +1,214 @@
-# Copyright (c) 2020, NVIDIA CORPORATION. All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
-#    documentation and/or other materials provided with the distribution.
-#  * Neither the name of NVIDIA CORPORATION nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
-# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-# OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 import json
-
-# triton_python_backend_utils is available in every Triton Python model. You
-# need to use this module to create inference requests and responses. It also
-# contains some utility functions for extracting information from model_config
-# and converting Triton input/output types to numpy types.
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
 import triton_python_backend_utils as pb_utils
-from torch import nn
+import random
 
 
-class AddSubNet(nn.Module):
+class SentimentClassifier(nn.Module):
     """
-    Simple AddSub network in PyTorch. This network outputs the sum and
-    subtraction of the inputs.
+    A transformer-based sentiment classifier model.
+    This model takes tokenized text sequences as input and outputs sentiment scores.
     """
-
-    def __init__(self):
-        super(AddSubNet, self).__init__()
-
-    def forward(self, input0, input1):
-        return (input0 + input1), (input0 - input1)
+    def __init__(self, vocab_size=10000, embed_dim=256, num_heads=8, 
+                 num_layers=4, max_seq_length=128, num_classes=3):
+        super(SentimentClassifier, self).__init__()
+        """
+        Initialize the sentiment classifier model.
+        
+        Args:
+            vocab_size: Size of the vocabulary
+            embed_dim: Embedding dimension
+            num_heads: Number of attention heads
+            num_layers: Number of transformer layers
+            max_seq_length: Maximum sequence length
+            num_classes: Number of sentiment classes
+        """
+        
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+        self.max_seq_length = max_seq_length
+        
+        # Embedding layers
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.position_embedding = nn.Embedding(max_seq_length, embed_dim)
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=0.1,
+            activation='relu',
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Classification head
+        self.fc1 = nn.Linear(embed_dim, embed_dim // 2)
+        self.dropout = nn.Dropout(0.1)
+        self.fc2 = nn.Linear(embed_dim // 2, num_classes)
+        
+    def forward(self, input_ids, attention_mask=None):
+        """
+        Args:
+            input_ids: Token IDs [batch_size, seq_length]
+            attention_mask: Attention mask [batch_size, seq_length]
+        Returns:
+            logits: Classification logits [batch_size, num_classes]
+        """
+        batch_size, seq_length = input_ids.shape
+        
+        # Create position IDs
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        
+        # Embeddings
+        token_embeds = self.token_embedding(input_ids)
+        position_embeds = self.position_embedding(position_ids)
+        embeddings = token_embeds + position_embeds
+        
+        # Create attention mask for transformer (inverted: 1 -> can attend, 0 -> cannot attend)
+        if attention_mask is not None:
+            # Convert to boolean mask (True = masked position)
+            src_key_padding_mask = (attention_mask == 0)
+        else:
+            src_key_padding_mask = None
+        
+        # Transformer encoding
+        encoded = self.transformer_encoder(
+            embeddings, 
+            src_key_padding_mask=src_key_padding_mask
+        )
+        
+        # Pool: take the mean of all non-padded tokens
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1).expand(encoded.size()).float()
+            sum_embeddings = torch.sum(encoded * mask_expanded, dim=1)
+            sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+            pooled = sum_embeddings / sum_mask
+        else:
+            pooled = encoded.mean(dim=1)
+        
+        # Classification
+        x = self.fc1(pooled)
+        x = F.relu(x)
+        x = self.dropout(x)
+        logits = self.fc2(x)
+        
+        return logits
 
 
 class TritonPythonModel:
-    """Your Python model must use the same class name. Every Python model
-    that is created must have "TritonPythonModel" as the class name.
     """
-
+    Triton Python backend model wrapper for the transformer sentiment classifier.
+    """
     def initialize(self, args):
-        """`initialize` is called only once when the model is being loaded.
-        Implementing `initialize` function is optional. This function allows
-        the model to initialize any state associated with this model.
-
-        Parameters
-        ----------
-        args : dict
-          Both keys and values are strings. The dictionary keys and values are:
-          * model_config: A JSON string containing the model configuration
-          * model_instance_kind: A string containing model instance kind
-          * model_instance_device_id: A string containing model instance device ID
-          * model_repository: Model repository path
-          * model_version: Model version
-          * model_name: Model name
         """
-
-        # You must parse model_config. JSON string is not parsed here
-        self.model_config = model_config = json.loads(args["model_config"])
-
-        # Get OUTPUT0 configuration
-        output0_config = pb_utils.get_output_config_by_name(model_config, "OUTPUT0")
-
-        # Get OUTPUT1 configuration
-        output1_config = pb_utils.get_output_config_by_name(model_config, "OUTPUT1")
-
-        # Convert Triton types to numpy types
-        self.output0_dtype = pb_utils.triton_string_to_numpy(
-            output0_config["data_type"]
-        )
-        self.output1_dtype = pb_utils.triton_string_to_numpy(
-            output1_config["data_type"]
-        )
-
-        # Instantiate the PyTorch model
-        self.add_sub_model = AddSubNet()
-
+        Initialize the model. This function is called once when the model is loaded.
+        
+        Args:
+            args: Dictionary containing initialization parameters
+        """
+        self.model_config = model_config = json.loads(args['model_config'])
+        
+        # Get output configuration
+        output_config = pb_utils.get_output_config_by_name(model_config, "OUTPUT")
+        self.output_dtype = pb_utils.triton_string_to_numpy(output_config['data_type'])
+        
+        # Model parameters
+        self.vocab_size = 10000
+        self.embed_dim = 256
+        self.num_heads = 8
+        self.num_layers = 4
+        self.max_seq_length = 128
+        self.num_classes = 3  # Negative, Neutral, Positive
+        
+        # Device configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Set all random seeds for reproducibility BEFORE model initialization
+        seed = 42
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)  # For multi-GPU
+            # Make CUDA operations deterministic
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        
+        # Initialize the model
+        self.model = SentimentClassifier(
+            vocab_size=self.vocab_size,
+            embed_dim=self.embed_dim,
+            num_heads=self.num_heads,
+            num_layers=self.num_layers,
+            max_seq_length=self.max_seq_length,
+            num_classes=self.num_classes
+        ).to(self.device)
+        
+        # Set model to evaluation mode to disable dropout and ensure consistent outputs
+        self.model.eval()
+        
+        print(f"Model initialized on device: {self.device}")
+        print(f"Model parameters: vocab_size={self.vocab_size}, embed_dim={self.embed_dim}, "
+              f"num_heads={self.num_heads}, num_layers={self.num_layers}, "
+              f"max_seq_length={self.max_seq_length}, num_classes={self.num_classes}")
+    
     def execute(self, requests):
-        """`execute` must be implemented in every Python model. `execute`
-        function receives a list of pb_utils.InferenceRequest as the only
-        argument. This function is called when an inference is requested
-        for this model. Depending on the batching configuration (e.g. Dynamic
-        Batching) used, `requests` may contain multiple requests. Every
-        Python model, must create one pb_utils.InferenceResponse for every
-        pb_utils.InferenceRequest in `requests`. If there is an error, you can
-        set the error argument when creating a pb_utils.InferenceResponse.
-
-        Parameters
-        ----------
-        requests : list
-          A list of pb_utils.InferenceRequest
-
-        Returns
-        -------
-        list
-          A list of pb_utils.InferenceResponse. The length of this list must
-          be the same as `requests`
         """
-
-        output0_dtype = self.output0_dtype
-        output1_dtype = self.output1_dtype
-
+        Execute inference on a batch of requests.
+        
+        Args:
+            requests: List of pb_utils.InferenceRequest objects
+            
+        Returns:
+            List of pb_utils.InferenceResponse objects
+        """
         responses = []
-
-        # Every Python backend must iterate over everyone of the requests
-        # and create a pb_utils.InferenceResponse for each of them.
+        
         for request in requests:
-            # Get INPUT0
-            in_0 = pb_utils.get_input_tensor_by_name(request, "INPUT0")
-            # Get INPUT1
-            in_1 = pb_utils.get_input_tensor_by_name(request, "INPUT1")
-
-            out_0, out_1 = self.add_sub_model(in_0.as_numpy(), in_1.as_numpy())
-
-            # Create output tensors. You need pb_utils.Tensor
-            # objects to create pb_utils.InferenceResponse.
-            out_tensor_0 = pb_utils.Tensor("OUTPUT0", out_0.astype(output0_dtype))
-            out_tensor_1 = pb_utils.Tensor("OUTPUT1", out_1.astype(output1_dtype))
-
-            # Create InferenceResponse. You can set an error here in case
-            # there was a problem with handling this inference request.
-            # Below is an example of how you can set errors in inference
-            # response:
-            #
-            # pb_utils.InferenceResponse(
-            #    output_tensors=..., TritonError("An error occurred"))
-            inference_response = pb_utils.InferenceResponse(
-                output_tensors=[out_tensor_0, out_tensor_1]
-            )
+            # Get input tensors
+            input_ids_tensor = pb_utils.get_input_tensor_by_name(request, "INPUT_IDS")
+            attention_mask_tensor = pb_utils.get_input_tensor_by_name(request, "ATTENTION_MASK")
+            
+            # Convert to numpy
+            input_ids_np = input_ids_tensor.as_numpy()
+            attention_mask_np = attention_mask_tensor.as_numpy()
+            
+            # Convert to torch tensors
+            input_ids = torch.from_numpy(input_ids_np).long().to(self.device)
+            attention_mask = torch.from_numpy(attention_mask_np).long().to(self.device)
+            
+            # Run inference
+            with torch.no_grad():
+                logits = self.model(input_ids, attention_mask)
+            
+                # Apply softmax to get probabilities
+                probabilities = F.softmax(logits, dim=-1)
+            
+            # Convert output to numpy
+            output_np = probabilities.cpu().numpy().astype(self.output_dtype)
+            
+            # Create output tensor
+            output_tensor = pb_utils.Tensor("OUTPUT", output_np)
+            
+            # Create inference response
+            inference_response = pb_utils.InferenceResponse(output_tensors=[output_tensor])
             responses.append(inference_response)
-
-        # You should return a list of pb_utils.InferenceResponse. Length
-        # of this list must match the length of `requests` list.
+        
         return responses
-
+    
     def finalize(self):
-        """`finalize` is called only once when the model is being unloaded.
-        Implementing `finalize` function is optional. This function allows
-        the model to perform any necessary clean ups before exit.
         """
-        print("Cleaning up...")
+        Clean up resources when the model is unloaded.
+        """
+        print("Cleaning up model resources...")
+        del self.model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
