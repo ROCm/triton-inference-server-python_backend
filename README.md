@@ -40,6 +40,7 @@ any C++ code.
   - [User Documentation](#user-documentation)
   - [Quick Start](#quick-start)
   - [Building from Source](#building-from-source)
+  - [Running Tests](#running-tests)
   - [Usage](#usage)
     - [`auto_complete_config`](#auto_complete_config)
     - [`initialize`](#initialize)
@@ -163,7 +164,12 @@ sudo apt-get install rapidjson-dev libarchive-dev zlib1g-dev
 ```
 mkdir build
 cd build
-cmake -DTRITON_ENABLE_GPU=ON -DTRITON_BACKEND_REPO_TAG=<GIT_BRANCH_NAME> -DTRITON_COMMON_REPO_TAG=<GIT_BRANCH_NAME> -DTRITON_CORE_REPO_TAG=<GIT_BRANCH_NAME> -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install ..
+cmake -DTRITON_ENABLE_GPU=OFF \
+  -DTRITON_ENABLE_ROCM=ON \
+  -DTRITON_ENABLE_TESTS=ON \
+  -Dhip_DIR=/opt/rocm/lib/cmake/hip \
+  -DHIPIFY_PEARL_PATH=/opt/rocm/bin \
+  -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install ..
 make install
 ```
 
@@ -198,6 +204,14 @@ cp examples/add_sub/config.pbtxt models/add_sub/config.pbtxt
 
 ```
 python3 examples/add_sub/client.py
+```
+
+## Running Tests
+
+After following [Building from Source](#building-from-source), you can run the tests with the following command from the `build` directory:
+
+```bash
+ctest --verbose --output-on-failure
 ```
 
 ## Usage
