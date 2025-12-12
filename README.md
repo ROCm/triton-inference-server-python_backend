@@ -89,6 +89,13 @@ any C++ code.
   - [Model Instance Kind](#model-instance-kind)
   - [Auto-complete config](#auto-complete-config)
   - [Custom Metrics](#custom-metrics-1)
+- [Validate Tabular Accuracy for ROCm](#validate-tabular-accuracy-for-rocm)
+  - [Setup](#setup)
+  - [Collect CPU Reference Outputs](#collect-cpu-reference-outputs)
+  - [Copy artifacts to triton-server repository](#copy-artifacts-to-triton-server-repository)
+  - [Add dependency to triton-server container](#add-dependency-to-triton-server-container)
+  - [Start the Triton Server](#start-the-triton-server)
+  - [Test the model](#test-the-model)
 - [Running with Inferentia](#running-with-inferentia)
 - [Logging](#logging)
 - [Reporting problems, asking questions](#reporting-problems-asking-questions)
@@ -1736,6 +1743,135 @@ instructions in [examples/auto_complete](examples/auto_complete/README.md).
 The example shows how to use custom metrics API in Python Backend. You can find
 the complete example instructions in
 [examples/custom_metrics](examples/custom_metrics/README.md).
+
+# Validate Tabular Accuracy for ROCm
+
+This section shows how to validate the accuracy of the `python_backend` ROCm
+enabled implementation for the [FTTransformer](https://github.com/lucidrains/tab-transformer-pytorch/blob/main/README.md#ft-transformer) model, which is a classification transformer for tabular data.
+
+You can find the reference paper for the model from the link above.
+
+For this experiment, we generate random weights and inputs, then collect the outputs from 
+running the `FTTransformer` model on CPU.
+
+We then re-use those same weights and inputs, and run the `FTTransformer` model 
+on ROCm, via the [Triton Inference Server](https://github.com/ROCm/triton-inference-server-server/tree/rocm_python_backend).
+
+We then compare the outputs from CPU and ROCm, and calculate the accuracy.
+
+## Setup
+
+You will need to have two terminals open for this test.
+
+1. Clone the [Triton Inference Server](https://github.com/ROCm/triton-inference-server-server/tree/rocm_python_backend) repository.
+
+```
+git clone https://github.com/ROCm/triton-inference-server-server.git
+cd triton-inference-server-server
+git checkout rocm_python_backend
+```
+
+2. In a separate terminal, build this repository [from source](#building-from-source).
+
+3. The rest of the necessary files for this test are included in the [examples/tab_transform_pytorch](examples/tab_transform_pytorch) directory of this repository.
+
+## Collect CPU Reference Outputs
+
+> [!NOTE]
+> These should all be done from the `python_backend` terminal.
+
+After building from source, install the additional dependencies for this example.
+```
+pip install -r examples/tab_transform_pytorch/requirements.txt
+```
+
+Then, generate the reference outputs.
+```
+cd examples/tab_transform_pytorch
+python generate_reference.py --output-dir . --num-samples 10000 --seed 42
+```
+
+This will generate the following files:
+- `ft_transformer.pt` - The model weights.
+- `reference_inputs.npz` - The input data.
+- `reference_outputs.npz` - The expected outputs from the model.
+
+## Copy artifacts to triton-server repository
+
+Next, we need to copy over our artifacts to the `triton-server` repo to run the model on ROCm.
+
+> [!NOTE]
+> These should all be done from the `triton-server` terminal.
+
+1. Create the model repository.
+
+```bash
+mkdir -p models/tab_transform_pytorch/1/
+```
+
+2. Copy over the model and config files.
+
+This will define the model that we'll run on ROCm.
+
+```bash
+cp ../python_backend/examples/tab_transform_pytorch/model.py models/tab_transform_pytorch/1/model.py
+cp ../python_backend/examples/tab_transform_pytorch/config.pbtxt models/tab_transform_pytorch/config.pbtxt
+```
+
+3. Copy over the weights.
+
+This will copy over the weights that we generated earlier.
+
+```bash
+cp ../python_backend/examples/tab_transform_pytorch/ft_transformer.pt models/tab_transform_pytorch/1/ft_transformer.pt
+```
+
+## Add dependency to triton-server container
+
+We will need to add the `tab-transformer-pytorch` dependency to the triton-server container.
+
+Search for the `pip3 install --upgrade "numpy<2"` line in the
+`docker_prepare_container_linux` function of the `build.py` file.
+
+Add the following line after the `numpy` installation:
+
+```python
+pip3 install --upgrade "tab-transformer-pytorch>=0.5.1" && \
+```
+
+## Start the Triton Server
+
+See the [Triton Inference Server](https://github.com/ROCm/triton-inference-server-server/tree/rocm_python_backend) repository for instructions on how to start the server. Use the new model repository we created earlier.
+
+Build the container and run the server according to the instructions.
+
+## Test the model
+
+> [!NOTE]
+> These should all be done from the `python_backend` terminal.
+
+Run the client script in the [examples/tab_transform_pytorch](examples/tab_transform_pytorch) directory
+to verify that the GPU outputs match the CPU outputs.
+
+```bash
+cd examples/tab_transform_pytorch
+python client.py --verify --reference-dir . --tolerance 1e-5
+```
+
+This should print out the results of the verification:
+
+```bash
+Results:
+  Max absolute difference:  4.17e-07
+  Mean absolute difference: 7.86e-08
+  Tolerance:                1.00e-05
+  Samples exceeding tolerance: 0/10000
+
+============================================================
+PASS: All 10000 samples within tolerance (1e-05)
+      GPU implementation matches CPU reference!
+============================================================
+```
 
 # Running with Inferentia
 

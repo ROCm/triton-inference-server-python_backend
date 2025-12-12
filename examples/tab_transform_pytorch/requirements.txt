@@ -1,0 +1,2 @@
+tab-transformer-pytorch>=0.5.1
+tritonclient[all]==2.39.0
