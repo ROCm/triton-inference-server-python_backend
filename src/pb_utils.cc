@@ -48,8 +48,189 @@ extern char** environ;
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 #endif
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+#endif
 
 namespace triton { namespace backend { namespace python {
+
+#ifdef TRITON_ENABLE_ROCM
+
+HIPHandler::HIPHandler()
+{
+  dl_open_handle_ = dlopen("libamdhip64.so", RTLD_LAZY);
+
+  if (dl_open_handle_ != nullptr) {
+    void* cu_pointer_get_attribute_fn =
+        dlsym(dl_open_handle_, "hipPointerGetAttribute");
+    if (cu_pointer_get_attribute_fn == nullptr) {
+      throw PythonBackendException(
+          std::string("Failed to dlsym 'hipPointerGetAttribute'. Error: ") +
+          dlerror());
+    }
+    *((void**)&cu_pointer_get_attribute_fn_) = cu_pointer_get_attribute_fn;
+
+    void* cu_get_error_string_fn = dlsym(dl_open_handle_, "hipGetErrorString");
+    if (cu_get_error_string_fn == nullptr) {
+      throw PythonBackendException(
+          std::string("Failed to dlsym 'hipGetErrorString'. Error: ") +
+          dlerror());
+    }
+    *((void**)&cu_get_error_string_fn_) = cu_get_error_string_fn;
+
+    void* cu_init_fn = dlsym(dl_open_handle_, "hipInit");
+    if (cu_init_fn == nullptr) {
+      throw PythonBackendException(
+          std::string("Failed to dlsym 'hipInit'. Error: ") + dlerror());
+    }
+    *((void**)&cu_init_fn_) = cu_init_fn;
+
+    void* cu_device_primary_ctx_get_state_fn =
+        dlsym(dl_open_handle_, "hipDevicePrimaryCtxGetState");
+    if (cu_device_primary_ctx_get_state_fn == nullptr) {
+      throw PythonBackendException(
+          std::string("Failed to dlsym 'hipDevicePrimaryCtxGetState'. Error: ") +
+          dlerror());
+    }
+    *((void**)&cu_device_primary_ctx_get_state_fn_) =
+        cu_device_primary_ctx_get_state_fn;
+
+    hipError_t cuda_err = (*cu_init_fn_)(0 /* flags */);
+    if (cuda_err != hipSuccess) {
+      const char* error_string;
+      (*cu_get_error_string_fn_)(cuda_err, &error_string);
+      error_str_ = std::string("failed to call hipInit: ") + error_string;
+      dlclose(dl_open_handle_);
+      dl_open_handle_ = nullptr;
+    }
+  }
+}
+
+void
+HIPHandler::PointerGetAttribute(
+    hipDeviceptr_t* start_address, hipPointer_attribute attribute,
+    hipDeviceptr_t dev_ptr)
+{
+  hipError_t cuda_err =
+      (*cu_pointer_get_attribute_fn_)(start_address, attribute, dev_ptr);
+  if (cuda_err != hipSuccess) {
+    const char* error_string;
+    (*cu_get_error_string_fn_)(cuda_err, &error_string);
+    throw PythonBackendException(
+        std::string(
+            "failed to get hip pointer device attribute: " +
+            std::string(error_string))
+            .c_str());
+  }
+}
+
+bool
+HIPHandler::IsAvailable()
+{
+  return dl_open_handle_ != nullptr;
+}
+
+void
+HIPHandler::OpenHipHandle(
+    int64_t memory_type_id, hipIpcMemHandle_t* cuda_mem_handle,
+    void** data_ptr)
+{
+  std::lock_guard<std::mutex> guard{mu_};
+  ScopedSetDevice scoped_set_device(memory_type_id);
+
+  hipError_t err = hipIpcOpenMemHandle(
+      data_ptr, *cuda_mem_handle, hipIpcMemLazyEnablePeerAccess);
+  if (err != hipSuccess) {
+    throw PythonBackendException(
+        std::string("Failed to open the hipIpcHandle. error: ") +
+        hipGetErrorString(err));
+  }
+}
+
+void
+HIPHandler::CloseHipHandle(int64_t memory_type_id, void* data_ptr)
+{
+  std::lock_guard<std::mutex> guard{mu_};
+  int current_device;
+
+  hipError_t err = hipGetDevice(&current_device);
+  if (err != hipSuccess) {
+    throw PythonBackendException(
+        std::string("Failed to get the current HIP device. error: ") +
+        hipGetErrorString(err));
+  }
+
+  ScopedSetDevice scoped_set_device(memory_type_id);
+  err = hipIpcCloseMemHandle(data_ptr);
+  if (err != hipSuccess) {
+    throw PythonBackendException(
+        std::string("Failed to close the hipIpcHandle. error: ") +
+        hipGetErrorString(err));
+  }
+}
+
+bool
+HIPHandler::HasPrimaryContext(int device)
+{
+  unsigned int ctx_flags;
+  int ctx_is_active = 0;
+  hipError_t cuda_err = (*cu_device_primary_ctx_get_state_fn_)(
+      device, &ctx_flags, &ctx_is_active);
+  if (cuda_err != hipSuccess) {
+    const char* error_string;
+    (*cu_get_error_string_fn_)(cuda_err, &error_string);
+    throw PythonBackendException(
+        std::string(
+            "failed to get primary context state: " + std::string(error_string))
+            .c_str());
+  }
+
+  return ctx_is_active == 1;
+}
+
+void
+HIPHandler::MaybeSetDevice(int device)
+{
+  if (HasPrimaryContext(device)) {
+    hipError_t err = hipSetDevice(device);
+    if (err != hipSuccess) {
+      throw PythonBackendException(
+          std::string("Failed to set the HIP device to ") +
+          std::to_string(device) + ". error: " + hipGetErrorString(err));
+    }
+  }
+}
+
+HIPHandler::~HIPHandler() noexcept(false)
+{
+  if (dl_open_handle_ != nullptr) {
+    int status = dlclose(dl_open_handle_);
+    if (status != 0) {
+      throw PythonBackendException("Failed to close the libamdhip64 handle.");
+    }
+  }
+}
+
+ScopedSetDevice::ScopedSetDevice(int device)
+{
+  device_ = device;
+  THROW_IF_HIP_ERROR(hipGetDevice(&current_device_));
+
+  if (current_device_ != device_) {
+    THROW_IF_HIP_ERROR(hipSetDevice(device_));
+  }
+}
+
+ScopedSetDevice::~ScopedSetDevice()
+{
+  if (current_device_ != device_) {
+    HIPHandler& hip_handler = HIPHandler::getInstance();
+    hip_handler.MaybeSetDevice(current_device_);
+  }
+}
+
+#endif  // TRITON_ENABLE_ROCM
 
 #ifdef TRITON_ENABLE_GPU
 

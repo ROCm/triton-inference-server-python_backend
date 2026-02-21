@@ -32,6 +32,10 @@ namespace py = pybind11;
 #endif
 #include <algorithm>
 
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 #include "scoped_defer.h"
 
 
@@ -238,7 +242,6 @@ InferResponse::Send(
 #ifdef TRITON_ENABLE_GPU
   static bool log_warning = true;
 #endif  // TRITON_ENABLE_GPU
-
   std::shared_ptr<TRITONSERVER_Error*> response_error =
       WrapTritonErrorInSharedPtr(nullptr);
   std::unique_ptr<ScopedDefer> response_error_handling;
@@ -380,6 +383,36 @@ InferResponse::Send(
       output_buffers.push_back(
           {std::move(output_buffer), triton_output_buffer});
 #endif
+#ifdef TRITON_ENABLE_ROCM
+      hipIpcMemHandle_t* hip_ipc_mem_handle_p;
+      SET_ERROR_AND_RETURN(
+          response_error,
+          TRITONSERVER_BufferAttributesCudaIpcHandle(
+              output_buffer_attributes,
+              reinterpret_cast<void**>(&hip_ipc_mem_handle_p)));
+
+      if (hip_ipc_mem_handle_p != nullptr) {
+        SET_ERROR_AND_RETURN_IF_EXCEPTION(
+            response_error,
+            output_buffer = PbMemory::Create(
+                shm_pool, actual_memory_type, actual_memory_type_id,
+                output_tensor->ByteSize(),
+                reinterpret_cast<char*>(triton_output_buffer),
+                false /* copy_gpu */));
+        output_buffer->SetHipIpcHandle(hip_ipc_mem_handle_p);
+      } else {
+        SET_ERROR_AND_RETURN_IF_EXCEPTION(
+            response_error,
+            output_buffer = PbMemory::Create(
+                shm_pool, actual_memory_type, actual_memory_type_id,
+                output_tensor->ByteSize(),
+                reinterpret_cast<char*>(triton_output_buffer),
+                true /* copy_gpu */));
+      }
+      gpu_buffer_helper.AddBuffer(output_buffer->ShmHandle());
+      output_buffers.push_back(
+          {std::move(output_buffer), triton_output_buffer});
+#endif
     }
 
     // When we requested a GPU buffer but received a CPU buffer.
@@ -398,14 +431,26 @@ InferResponse::Send(
     }
 
     if (src_memory_type != TRITONSERVER_MEMORY_GPU) {
+#ifdef TRITON_ENABLE_GPU
       SET_ERROR_AND_RETURN(
           response_error,
           CopyBuffer(
               "Failed to copy the output tensor to buffer.", src_memory_type,
               src_memory_type_id, actual_memory_type, actual_memory_type_id,
               output_tensor->ByteSize(), output_tensor->DataPtr(),
-              triton_output_buffer, reinterpret_cast<cudaStream_t>(cuda_stream),
-              &cuda_used));
+              triton_output_buffer,
+              reinterpret_cast<cudaStream_t>(cuda_stream), &cuda_used));
+#endif
+#ifdef TRITON_ENABLE_ROCM
+      SET_ERROR_AND_RETURN(
+          response_error,
+          CopyBuffer(
+              "Failed to copy the output tensor to buffer.", src_memory_type,
+              src_memory_type_id, actual_memory_type, actual_memory_type_id,
+              output_tensor->ByteSize(), output_tensor->DataPtr(),
+              triton_output_buffer,
+              reinterpret_cast<hipStream_t>(cuda_stream), &cuda_used));
+#endif
     }
 
     cuda_copy |= cuda_used;
@@ -447,7 +492,13 @@ InferResponse::Send(
   if (cuda_copy) {
     cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(cuda_stream));
   }
-#endif  // TRITON_ENABLE_GPU
+#endif
+#ifdef TRITON_ENABLE_ROCM
+  if (cuda_copy) {
+    THROW_IF_HIP_ERROR(hipStreamSynchronize(
+        reinterpret_cast<hipStream_t>(cuda_stream)));
+  }
+#endif
 }
 #endif
 

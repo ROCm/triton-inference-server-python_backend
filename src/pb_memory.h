@@ -34,6 +34,9 @@
 #ifdef TRITON_ENABLE_GPU
 #include <cuda_runtime_api.h>
 #endif  // TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime_api.h>
+#endif  // TRITON_ENABLE_ROCM
 
 namespace triton { namespace backend { namespace python {
 
@@ -80,6 +83,9 @@ class PbMemory {
   void SetCudaIpcHandle(cudaIpcMemHandle_t* cuda_ipc_handle);
 
   void UpdateCUDAOffset(std::unique_ptr<CUDAMemoryPoolManager>& cuda_pool);
+#endif
+#ifdef TRITON_ENABLE_ROCM
+  void SetHipIpcHandle(hipIpcMemHandle_t* hip_ipc_handle);
 #endif
 
   // Copy the destination buffer to the source buffer.
@@ -173,6 +179,13 @@ class PbMemory {
   /// \throws PythonBackendException if the tensor is stored in CPU.
   void* GetGPUStartAddress();
 
+#endif
+#ifdef TRITON_ENABLE_ROCM
+  /// Calculate the pointer offset from the base address (HIP).
+  uint64_t GetGPUPointerOffset();
+
+  /// Get the GPU start address (HIP).
+  void* GetGPUStartAddress();
 #endif
 
   static void FillShmData(
