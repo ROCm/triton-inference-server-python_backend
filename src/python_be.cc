@@ -41,6 +41,13 @@ namespace triton { namespace backend { namespace python {
 
 namespace bi = boost::interprocess;
 
+// Single place for stream used in GPU/ROCm APIs (avoids repeating #ifdef at each call).
+#ifdef TRITON_ENABLE_ROCM
+#define PYTHON_BE_STREAM() (reinterpret_cast<hipStream_t>(stream_))
+#else
+#define PYTHON_BE_STREAM() (CudaStream())
+#endif
+
 ModelInstanceState::ModelInstanceState(
     ModelState* model_state, TRITONBACKEND_ModelInstance* triton_model_instance)
     : BackendModelInstance(model_state, triton_model_instance),
@@ -381,7 +388,7 @@ ModelInstanceState::GetInputTensor(
   if (responses) {
     collector = std::make_unique<BackendInputCollector>(
         &request, 1, responses.get(), Model()->TritonMemoryManager(),
-        false /* pinned_enable */, CudaStream(), nullptr, nullptr, 0,
+        false /* pinned_enable */, PYTHON_BE_STREAM(), nullptr, nullptr, 0,
         HostPolicyName().c_str());
   }
 
@@ -520,12 +527,11 @@ ModelInstanceState::GetInputTensor(
       bool cuda_used = false;
       RETURN_IF_ERROR(backend::ReadInputTensor(
           request, input_name, reinterpret_cast<char*>(dev_ptr), &byte_size,
-          TRITONSERVER_MEMORY_GPU, src_memory_type_id,
-          reinterpret_cast<void*>(stream_), &cuda_used));
+          TRITONSERVER_MEMORY_GPU, src_memory_type_id, PYTHON_BE_STREAM(),
+          &cuda_used));
 
       if (cuda_used) {
-        THROW_IF_HIP_ERROR(hipStreamSynchronize(
-            reinterpret_cast<hipStream_t>(stream_)));
+        THROW_IF_HIP_ERROR(hipStreamSynchronize(PYTHON_BE_STREAM()));
       }
 
       input_tensor = std::make_shared<PbTensor>(
@@ -618,7 +624,7 @@ ModelInstanceState::GetInputTensor(
       bool cuda_used = false;
       RETURN_IF_ERROR(backend::ReadInputTensor(
           request, input_name, reinterpret_cast<char*>(dev_ptr), &byte_size,
-          TRITONSERVER_MEMORY_GPU, src_memory_type_id, CudaStream(),
+          TRITONSERVER_MEMORY_GPU, src_memory_type_id, PYTHON_BE_STREAM(),
           &cuda_used));
 
       if (cuda_used) {
@@ -626,8 +632,7 @@ ModelInstanceState::GetInputTensor(
         cudaStreamSynchronize(stream_);
 #endif
 #ifdef TRITON_ENABLE_ROCM
-        THROW_IF_HIP_ERROR(hipStreamSynchronize(
-            reinterpret_cast<hipStream_t>(stream_)));
+        THROW_IF_HIP_ERROR(hipStreamSynchronize(PYTHON_BE_STREAM()));
 #endif
       }
 
@@ -1347,7 +1352,7 @@ ModelInstanceState::ResponseSendDecoupled(
 #endif  // TRITON_ENABLE_GPU
 
     infer_response->Send(
-        response, CudaStream(), requires_deferred_callback,
+        response, PYTHON_BE_STREAM(), requires_deferred_callback,
         send_message_payload->flags, Stub()->ShmPool(), gpu_buffer_helper,
         gpu_output_buffers);
 
@@ -1378,7 +1383,7 @@ ModelInstanceState::ResponseSendDecoupled(
                 "Failed to copy the CPU output tensor to buffer.",
                 TRITONSERVER_MEMORY_CPU, 0, TRITONSERVER_MEMORY_CPU, 0,
                 pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-                CudaStream(), &cuda_used));
+                PYTHON_BE_STREAM(), &cuda_used));
             cuda_copy |= cuda_used;
           } else if (
               (pb_memory->MemoryType() == TRITONSERVER_MEMORY_GPU) &&
@@ -1395,7 +1400,7 @@ ModelInstanceState::ResponseSendDecoupled(
                 TRITONSERVER_MEMORY_GPU, pb_memory->MemoryTypeId(),
                 TRITONSERVER_MEMORY_GPU, pb_memory->MemoryTypeId(),
                 pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-                CudaStream(), &cuda_used));
+                PYTHON_BE_STREAM(), &cuda_used));
             cuda_copy |= cuda_used;
           }
 #ifdef TRITON_ENABLE_GPU
@@ -1405,7 +1410,7 @@ ModelInstanceState::ResponseSendDecoupled(
 #endif
 #ifdef TRITON_ENABLE_ROCM
             THROW_IF_HIP_ERROR(hipStreamSynchronize(
-                reinterpret_cast<hipStream_t>(stream_)));
+                PYTHON_BE_STREAM()));
 #endif
           }
 #endif  // TRITON_ENABLE_GPU
@@ -1655,7 +1660,7 @@ ModelInstanceState::ProcessRequests(
       gpu_output_buffers[r] =
           std::vector<std::pair<std::unique_ptr<PbMemory>, void*>>{};
       infer_response->Send(
-          response, CudaStream(), require_deferred_callback,
+          response, PYTHON_BE_STREAM(), require_deferred_callback,
           TRITONSERVER_RESPONSE_COMPLETE_FINAL, Stub()->ShmPool(),
           gpu_buffer_helper, gpu_output_buffers[r], requested_output_names);
 
@@ -1695,7 +1700,7 @@ ModelInstanceState::ProcessRequests(
                     "Failed to copy the output tensor to buffer.",
                     TRITONSERVER_MEMORY_CPU, 0, TRITONSERVER_MEMORY_CPU, 0,
                     pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-                    CudaStream(), &cuda_used));
+                    PYTHON_BE_STREAM(), &cuda_used));
             cuda_copy |= cuda_used;
           } else if (
               (pb_memory->MemoryType() == TRITONSERVER_MEMORY_GPU) &&
@@ -1714,7 +1719,7 @@ ModelInstanceState::ProcessRequests(
                     TRITONSERVER_MEMORY_GPU, pb_memory->MemoryTypeId(),
                     TRITONSERVER_MEMORY_GPU, pb_memory->MemoryTypeId(),
                     pb_memory->ByteSize(), pb_memory->DataPtr(), pointer,
-                    CudaStream(), &cuda_used));
+                    PYTHON_BE_STREAM(), &cuda_used));
             cuda_copy |= cuda_used;
           }
         }
@@ -1726,7 +1731,7 @@ ModelInstanceState::ProcessRequests(
 #endif
 #ifdef TRITON_ENABLE_ROCM
           THROW_IF_HIP_ERROR(hipStreamSynchronize(
-              reinterpret_cast<hipStream_t>(stream_)));
+              PYTHON_BE_STREAM()));
 #endif
         }
 #endif  // TRITON_ENABLE_GPU
@@ -2591,4 +2596,7 @@ TRITONBACKEND_GetBackendAttribute(
 }
 
 }  // extern "C"
+
+#undef PYTHON_BE_STREAM
+
 }}}  // namespace triton::backend::python
