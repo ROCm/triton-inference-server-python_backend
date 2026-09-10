@@ -469,7 +469,7 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
 #elif defined(TRITON_ENABLE_ROCM)
     int current_device;
     hipError_t err = hipGetDevice(&current_device);
-    std::unique_ptr<Stub>& stub = Stub::GetOrCreateInstance();
+    auto stub = Stub::GetOrCreateInstance();
     if (err != hipSuccess) {
       throw PythonBackendException("Failed to get current ROCm device id.");
     }
