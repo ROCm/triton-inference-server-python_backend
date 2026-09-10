@@ -26,7 +26,10 @@
 
 #ifdef TRITON_ENABLE_GPU
 #include <cuda.h>
-#endif  // TRITON_ENABLE_GPU
+#endif
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#endif
 
 #ifdef TRITON_PB_STUB
 #include "pb_stub.h"
@@ -304,13 +307,21 @@ PbTensor::DeviceType()
 
   switch (memory_type_) {
     case TRITONSERVER_MEMORY_GPU:
+#ifdef TRITON_ENABLE_ROCM
+      device_type = DLDeviceType::kDLROCM;
+#else
       device_type = DLDeviceType::kDLCUDA;
+#endif
       break;
     case TRITONSERVER_MEMORY_CPU:
       device_type = DLDeviceType::kDLCPU;
       break;
     case TRITONSERVER_MEMORY_CPU_PINNED:
+#ifdef TRITON_ENABLE_ROCM
+      device_type = DLDeviceType::kDLROCMHost;
+#else
       device_type = DLDeviceType::kDLCUDAHost;
+#endif
       break;
   }
 
@@ -415,7 +426,8 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
 
   auto capsule_device_info =
       tensor.attr("__dlpack_device__")().cast<std::pair<int32_t, int64_t>>();
-  if (capsule_device_info.first == DLDeviceType::kDLCUDA) {
+  if (capsule_device_info.first == DLDeviceType::kDLCUDA ||
+      capsule_device_info.first == DLDeviceType::kDLROCM) {
 #ifdef TRITON_ENABLE_GPU
     int current_device;
     cudaError_t err = cudaGetDevice(&current_device);
@@ -449,6 +461,33 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
     if (err != cudaSuccess) {
       throw PythonBackendException(
           "Failed to synchronize CUDA device with id " +
+          std::to_string(
+              overridden ? capsule_device_info.second : current_device));
+    }
+
+    return ptr_to_tensor;
+#elif defined(TRITON_ENABLE_ROCM)
+    int current_device;
+    hipError_t err = hipGetDevice(&current_device);
+    std::unique_ptr<Stub>& stub = Stub::GetOrCreateInstance();
+    if (err != hipSuccess) {
+      throw PythonBackendException("Failed to get current ROCm device id.");
+    }
+    ScopedSetDevice scoped_set_device(capsule_device_info.second);
+
+    bool overridden = (current_device != capsule_device_info.second);
+    hipStream_t proxy_stream =
+        reinterpret_cast<hipStream_t>(stub->GetProxyStream(current_device));
+
+    auto ptr_to_tensor = FromDLPackCapsule(
+        name, tensor.attr("__dlpack__")(
+                  py::arg("stream") =
+                      py::int_(reinterpret_cast<int64_t>(proxy_stream))));
+
+    err = hipStreamSynchronize(proxy_stream);
+    if (err != hipSuccess) {
+      throw PythonBackendException(
+          "Failed to synchronize ROCm device with id " +
           std::to_string(
               overridden ? capsule_device_info.second : current_device));
     }

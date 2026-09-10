@@ -65,12 +65,17 @@
 
 #ifdef TRITON_ENABLE_GPU
 #include <cuda_runtime_api.h>
-#endif  // TRITON_ENABLE_GPU
+#endif
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime_api.h>
+#endif
 
 namespace py = pybind11;
 using namespace pybind11::literals;
 namespace bi = boost::interprocess;
-#ifndef TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+using deviceStream_t = hipStream_t;
+#elif !defined(TRITON_ENABLE_GPU)
 using cudaStream_t = void*;
 #endif
 
@@ -1007,15 +1012,23 @@ Stub::Finalize()
     }
   }
 #ifdef TRITON_ENABLE_GPU
-  // We also need to destroy created proxy CUDA streams for dlpack, if any
   std::lock_guard<std::mutex> lock(dlpack_proxy_stream_pool_mu_);
   for (auto& entry : dlpack_proxy_stream_pool_) {
-    // We don't need to switch device to destroy a stream
-    // https://stackoverflow.com/questions/64663943/how-to-destroy-a-stream-that-was-created-on-a-specific-device
     cudaError_t err = cudaStreamDestroy(entry.second);
     if (err != cudaSuccess) {
       LOG_ERROR
           << "Failed to destroy dlpack CUDA proxy stream on device with id " +
+                 std::to_string(entry.first);
+    }
+  }
+#elif defined(TRITON_ENABLE_ROCM)
+  std::lock_guard<std::mutex> lock(dlpack_proxy_stream_pool_mu_);
+  for (auto& entry : dlpack_proxy_stream_pool_) {
+    hipError_t err = hipStreamDestroy(
+        reinterpret_cast<hipStream_t>(entry.second));
+    if (err != hipSuccess) {
+      LOG_ERROR
+          << "Failed to destroy dlpack HIP proxy stream on device with id " +
                  std::to_string(entry.first);
     }
   }
@@ -1439,6 +1452,22 @@ Stub::GetProxyStream(const int& device_id)
     } else {
       throw PythonBackendException(
           "Failed to create a CUDA stream for a DLPack call.");
+    }
+  }
+  return dlpack_proxy_stream_pool_[device_id];
+#elif defined(TRITON_ENABLE_ROCM)
+  std::lock_guard<std::mutex> lock(dlpack_proxy_stream_pool_mu_);
+  if (dlpack_proxy_stream_pool_.find(device_id) ==
+      dlpack_proxy_stream_pool_.end()) {
+    hipStream_t new_proxy_stream;
+    hipError_t err = hipStreamCreate(&new_proxy_stream);
+    if (err == hipSuccess) {
+      dlpack_proxy_stream_pool_.emplace(
+          device_id, reinterpret_cast<cudaStream_t>(new_proxy_stream));
+      return reinterpret_cast<cudaStream_t>(new_proxy_stream);
+    } else {
+      throw PythonBackendException(
+          "Failed to create a HIP stream for a DLPack call.");
     }
   }
   return dlpack_proxy_stream_pool_[device_id];

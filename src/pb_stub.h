@@ -45,7 +45,13 @@ namespace bi = boost::interprocess;
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-#ifndef TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime_api.h>
+using deviceStream_t = hipStream_t;
+using cudaStream_t = hipStream_t;  // Alias for pool type compatibility
+#elif defined(TRITON_ENABLE_GPU)
+#include <cuda_runtime_api.h>
+#else
 using cudaStream_t = void*;
 #endif
 

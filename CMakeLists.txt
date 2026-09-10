@@ -37,7 +37,8 @@ set(TRITON_MIN_CXX_STANDARD 17 CACHE STRING "The minimum C++ standard which feat
 # Must include options required for this project as well as any
 # projects included in this one by FetchContent.
 #
-option(TRITON_ENABLE_GPU "Enable GPU support in backend" ON)
+option(TRITON_ENABLE_GPU "Enable GPU support in backend" OFF)
+option(TRITON_ENABLE_ROCM "Enable ROCm support in backend" ON)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend" ON)
 option(TRITON_ENABLE_NVTX "Include nvtx markers collection in backend." OFF)
 
@@ -48,9 +49,20 @@ if(WIN32)
 endif()
 
 set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
-set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
-set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
-set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
+if(${TRITON_ENABLE_ROCM})
+  set(TRITON_THIRD_PARTY_REPO_TAG "rocm7.2_r25.12" CACHE STRING "Tag for ROCm/triton-inference-server-third_party repo")
+  set(TRITON_CORE_REPO_TAG "rocm7.2_r25.12" CACHE STRING "Tag for ROCm/triton-inference-server-core repo")
+  set(TRITON_BACKEND_REPO_TAG "rocm7.2_r25.12" CACHE STRING "Tag for ROCm/triton-inference-server-backend repo")
+  set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
+  set(TRITON_CORE_REPO "https://github.com/ROCm/triton-inference-server-core.git")
+  set(TRITON_BACKEND_REPO "https://github.com/ROCm/triton-inference-server-backend.git")
+else()
+  set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
+  set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
+  set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
+  set(TRITON_CORE_REPO "${TRITON_REPO_ORGANIZATION}/core.git")
+  set(TRITON_BACKEND_REPO "${TRITON_REPO_ORGANIZATION}/backend.git")
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -75,12 +87,12 @@ FetchContent_Declare(
 )
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/core.git
+  GIT_REPOSITORY ${TRITON_CORE_REPO}
   GIT_TAG ${TRITON_CORE_REPO_TAG}
 )
 FetchContent_Declare(
   repo-backend
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/backend.git
+  GIT_REPOSITORY ${TRITON_BACKEND_REPO}
   GIT_TAG ${TRITON_BACKEND_REPO_TAG}
 )
 FetchContent_MakeAvailable(repo-common repo-core repo-backend)
@@ -141,6 +153,18 @@ ExternalProject_Add(
   BUILD_COMMAND ""
 )
 set(boostorg_INCLUDE_DIRS "${CMAKE_BINARY_DIR}/boost/")
+
+#
+# HIP (ROCm)
+#
+if(${TRITON_ENABLE_ROCM})
+  set(CMAKE_PREFIX_PATH "/opt/rocm" ${CMAKE_PREFIX_PATH})
+  find_package(hip REQUIRED)
+  message(STATUS "Using ROCm HIP ${hip_VERSION}")
+  set(HIP_HIPCC_FLAGS -std=c++${TRITON_MIN_CXX_STANDARD})
+else()
+  message(WARNING "TRITON_ENABLE_ROCM is OFF, AMD GPU Tensor support will be disabled")
+endif() # TRITON_ENABLE_ROCM
 
 #
 # CUDA
@@ -313,6 +337,11 @@ if(PYTHON_LIBRARY MATCHES "\\.a$")
     PROPERTIES
       ENABLE_EXPORTS TRUE
   )
+endif()
+
+if(${TRITON_ENABLE_ROCM})
+  target_compile_definitions(triton-python-backend PRIVATE TRITON_ENABLE_ROCM)
+  target_compile_definitions(triton-python-backend-stub PRIVATE TRITON_ENABLE_ROCM)
 endif()
 
 # RHEL assets are not released in a container environment nor do the current

@@ -28,6 +28,11 @@
 
 #include <sstream>
 
+#ifdef TRITON_ENABLE_ROCM
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+#endif
+
 namespace triton { namespace backend { namespace python {
 
 std::unique_ptr<PbMemory>
@@ -40,6 +45,9 @@ PbMemory::Create(
   if (memory_type == TRITONSERVER_MEMORY_GPU) {
 #ifdef TRITON_ENABLE_GPU
     requested_byte_size += sizeof(cudaIpcMemHandle_t);
+#endif
+#ifdef TRITON_ENABLE_ROCM
+    requested_byte_size += sizeof(hipIpcMemHandle_t);
 #endif
   } else {
     requested_byte_size += byte_size;
@@ -60,6 +68,12 @@ PbMemory::Create(
       new PbMemory(memory_shm, data, false /* opened_cuda_ipc_handle */));
 
 #ifdef TRITON_ENABLE_GPU
+  if (memory_type == TRITONSERVER_MEMORY_GPU) {
+    pb_memory->memory_shm_ptr_->gpu_pointer_offset =
+        pb_memory->GetGPUPointerOffset();
+  }
+#endif
+#ifdef TRITON_ENABLE_ROCM
   if (memory_type == TRITONSERVER_MEMORY_GPU) {
     pb_memory->memory_shm_ptr_->gpu_pointer_offset =
         pb_memory->GetGPUPointerOffset();
@@ -107,6 +121,12 @@ PbMemory::Create(
         pb_memory->GetGPUPointerOffset();
   }
 #endif
+#ifdef TRITON_ENABLE_ROCM
+  if (memory_type == TRITONSERVER_MEMORY_GPU) {
+    pb_memory->memory_shm_ptr_->gpu_pointer_offset =
+        pb_memory->GetGPUPointerOffset();
+  }
+#endif
 
   return pb_memory;
 }
@@ -128,6 +148,50 @@ PbMemory::CopyBuffer(
     std::memcpy(dst->DataPtr(), src->DataPtr(), dst->ByteSize());
     return;
   }
+
+#ifdef TRITON_ENABLE_ROCM
+  hipMemcpyKind kind = hipMemcpyHostToDevice;
+  if (src->MemoryType() == TRITONSERVER_MEMORY_CPU &&
+      dst->MemoryType() == TRITONSERVER_MEMORY_GPU) {
+    kind = hipMemcpyHostToDevice;
+  } else if (
+      src->MemoryType() == TRITONSERVER_MEMORY_GPU &&
+      dst->MemoryType() == TRITONSERVER_MEMORY_CPU) {
+    kind = hipMemcpyDeviceToHost;
+  } else if (
+      src->MemoryType() == TRITONSERVER_MEMORY_GPU &&
+      dst->MemoryType() == TRITONSERVER_MEMORY_GPU) {
+    kind = hipMemcpyDeviceToDevice;
+  }
+
+  hipError_t err;
+  if ((kind == hipMemcpyDeviceToDevice) &&
+      (src->MemoryTypeId() != dst->MemoryTypeId())) {
+    err = hipMemcpyPeer(
+        dst->DataPtr(), dst->MemoryTypeId(), src->DataPtr(),
+        src->MemoryTypeId(), src->ByteSize());
+  } else {
+    err = hipMemcpy(dst->DataPtr(), src->DataPtr(), src->ByteSize(), kind);
+  }
+
+  if (err != hipSuccess) {
+    throw PythonBackendException(
+        std::string(
+            "failed to copy data: " + std::string(hipGetErrorString(err)))
+            .c_str());
+  }
+
+  if (kind == hipMemcpyDeviceToDevice) {
+    err = hipStreamSynchronize(0);
+    if (err != hipSuccess) {
+      throw PythonBackendException(
+          std::string(
+              "failed to synchronize the default stream. error: " +
+              std::string(hipGetErrorString(err)))
+              .c_str());
+    }
+  }
+#endif  // TRITON_ENABLE_ROCM
 
 #ifdef TRITON_ENABLE_GPU
   cudaMemcpyKind kind = cudaMemcpyHostToDevice;
@@ -207,6 +271,13 @@ PbMemory::FillShmData(
       }
     }
 #endif  // TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+    if (data != nullptr && copy_gpu) {
+      ScopedSetDevice scoped_set_device(memory_type_id);
+      THROW_IF_HIP_ERROR(hipIpcGetMemHandle(
+          reinterpret_cast<hipIpcMemHandle_t*>(memory_data_shm), data));
+    }
+#endif  // TRITON_ENABLE_ROCM
   } else {
     if (data != nullptr) {
       std::copy(data, data + byte_size, memory_data_shm);
@@ -258,6 +329,18 @@ PbMemory::LoadFromSharedMemory(
     }
 
 #endif  // TRITON_ENABLE_GPU
+#ifdef TRITON_ENABLE_ROCM
+    hipIpcMemHandle_t* hip_handle =
+        reinterpret_cast<hipIpcMemHandle_t*>(memory_data_shm);
+    void* data_ptr_base;
+    HIPHandler& hip_handler = HIPHandler::getInstance();
+    hip_handler.OpenHipHandle(
+        memory_shm_ptr->memory_type_id, hip_handle, &data_ptr_base);
+    data_ptr =
+        (reinterpret_cast<char*>(data_ptr_base) +
+         memory_shm_ptr->gpu_pointer_offset);
+    opened_cuda_ipc_handle = true;
+#endif  // TRITON_ENABLE_ROCM
   } else {
     data_ptr = memory_data_shm;
   }
@@ -318,6 +401,18 @@ PbMemory::LoadFromSharedMemory(
              memory_shm_ptr->gpu_pointer_offset);
         opened_cuda_ipc_handle = true;
       }
+#endif
+#ifdef TRITON_ENABLE_ROCM
+      hipIpcMemHandle_t* hip_handle =
+          reinterpret_cast<hipIpcMemHandle_t*>(memory_data_shm);
+      void* data_ptr_base;
+      HIPHandler& hip_handler = HIPHandler::getInstance();
+      hip_handler.OpenHipHandle(
+          memory_shm_ptr->memory_type_id, hip_handle, &data_ptr_base);
+      data_ptr =
+          (reinterpret_cast<char*>(data_ptr_base) +
+           memory_shm_ptr->gpu_pointer_offset);
+      opened_cuda_ipc_handle = true;
 #endif
     }
   } else {
@@ -404,6 +499,38 @@ PbMemory::GetGPUPointerOffset()
 }
 #endif
 
+#ifdef TRITON_ENABLE_ROCM
+void*
+PbMemory::GetGPUStartAddress()
+{
+  if (memory_shm_ptr_->memory_type == TRITONSERVER_MEMORY_GPU) {
+    HIPHandler& hip_api = HIPHandler::getInstance();
+    hipDeviceptr_t start_address = 0;
+    if (data_ptr_) {
+      hip_api.PointerGetAttribute(
+          &start_address, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+          reinterpret_cast<hipDeviceptr_t>(data_ptr_));
+    }
+    return reinterpret_cast<void*>(start_address);
+  }
+  throw PythonBackendException(
+      "Calling GetGPUStartAddress function on CPU memory.");
+}
+
+uint64_t
+PbMemory::GetGPUPointerOffset()
+{
+  uint64_t offset;
+  if (memory_shm_ptr_->memory_type == TRITONSERVER_MEMORY_GPU) {
+    offset = data_ptr_ - reinterpret_cast<char*>(GetGPUStartAddress());
+  } else {
+    throw PythonBackendException(
+        "Calling GetGPUPointerOffset function on CPU tensor.");
+  }
+  return offset;
+}
+#endif
+
 TRITONSERVER_MemoryType
 PbMemory::MemoryType() const
 {
@@ -448,6 +575,9 @@ PbMemory::ShmStructSize(TRITONSERVER_MemoryType memory_type, uint64_t byte_size)
 #ifdef TRITON_ENABLE_GPU
     total_memory_size += sizeof(cudaIpcMemHandle_t);
 #endif
+#ifdef TRITON_ENABLE_ROCM
+    total_memory_size += sizeof(hipIpcMemHandle_t);
+#endif
   } else {
     total_memory_size += byte_size;
   }
@@ -461,7 +591,16 @@ PbMemory::SetCudaIpcHandle(cudaIpcMemHandle_t* cuda_ipc_handle)
 {
   *(reinterpret_cast<cudaIpcMemHandle_t*>(ShmData())) = *(cuda_ipc_handle);
 }
+#endif
+#ifdef TRITON_ENABLE_ROCM
+void
+PbMemory::SetHipIpcHandle(hipIpcMemHandle_t* hip_ipc_handle)
+{
+  *(reinterpret_cast<hipIpcMemHandle_t*>(ShmData())) = *(hip_ipc_handle);
+}
+#endif
 
+#ifdef TRITON_ENABLE_GPU
 void
 PbMemory::UpdateCUDAOffset(std::unique_ptr<CUDAMemoryPoolManager>& cuda_pool)
 {
@@ -481,6 +620,11 @@ PbMemory::~PbMemory()
 #ifdef TRITON_ENABLE_GPU
     CUDAHandler& cuda_handler = CUDAHandler::getInstance();
     cuda_handler.CloseCudaHandle(
+        memory_shm_ptr_->memory_type_id, GetGPUStartAddress());
+#endif
+#ifdef TRITON_ENABLE_ROCM
+    HIPHandler& hip_handler = HIPHandler::getInstance();
+    hip_handler.CloseHipHandle(
         memory_shm_ptr_->memory_type_id, GetGPUStartAddress());
 #endif
   }
