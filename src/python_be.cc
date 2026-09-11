@@ -1656,7 +1656,7 @@ ModelInstanceState::ResponseSendDecoupled(
                 PYTHON_BE_STREAM(), &cuda_used));
             cuda_copy |= cuda_used;
           }
-#ifdef TRITON_ENABLE_GPU
+#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
           if (cuda_copy) {
 #ifdef TRITON_ENABLE_GPU
             cudaStreamSynchronize(stream_);
@@ -1666,7 +1666,7 @@ ModelInstanceState::ResponseSendDecoupled(
                 PYTHON_BE_STREAM()));
 #endif
           }
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_GPU || TRITON_ENABLE_ROCM
         }
         catch (const PythonBackendException& pb_exception) {
           TRITONSERVER_Error* error = TRITONSERVER_ErrorNew(
@@ -1977,7 +1977,7 @@ ModelInstanceState::ProcessRequests(
           }
         }
         response_index++;
-#ifdef TRITON_ENABLE_GPU
+#if defined(TRITON_ENABLE_GPU) || defined(TRITON_ENABLE_ROCM)
         if (cuda_copy) {
 #ifdef TRITON_ENABLE_GPU
           cudaStreamSynchronize(stream_);
@@ -1987,7 +1987,7 @@ ModelInstanceState::ProcessRequests(
               PYTHON_BE_STREAM()));
 #endif
         }
-#endif  // TRITON_ENABLE_GPU
+#endif  // TRITON_ENABLE_GPU || TRITON_ENABLE_ROCM
       }
     }
 

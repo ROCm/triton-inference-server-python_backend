@@ -500,7 +500,8 @@ PbTensor::FromDLPack(const std::string& name, const py::object& tensor)
 #endif
   } else if (
       capsule_device_info.first != DLDeviceType::kDLCPU &&
-      capsule_device_info.first != DLDeviceType::kDLCUDAHost) {
+      capsule_device_info.first != DLDeviceType::kDLCUDAHost &&
+      capsule_device_info.first != DLDeviceType::kDLROCMHost) {
     throw PythonBackendException(
         "DLDevice type " + std::to_string(capsule_device_info.first) +
         " is not support by Python backend.");
@@ -559,6 +560,7 @@ PbTensor::FromDLPackCapsule(
 
   switch (dl_managed_tensor->dl_tensor.device.device_type) {
     case DLDeviceType::kDLCUDA:
+    case DLDeviceType::kDLROCM:
       memory_type = TRITONSERVER_MEMORY_GPU;
       memory_type_id = dl_managed_tensor->dl_tensor.device.device_id;
       break;
@@ -567,6 +569,7 @@ PbTensor::FromDLPackCapsule(
       memory_type_id = 0;
       break;
     case DLDeviceType::kDLCUDAHost:
+    case DLDeviceType::kDLROCMHost:
       memory_type = TRITONSERVER_MEMORY_CPU;
       memory_type_id = 0;
       break;
